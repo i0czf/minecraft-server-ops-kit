@@ -1,0 +1,8 @@
+{
+  "name": "server-tools",
+  "private": true,
+  "description": "Server ops helpers (bluemap-shot 无头截图等)",
+  "dependencies": {
+    "puppeteer-core": "^23.0.0"
+  }
+}

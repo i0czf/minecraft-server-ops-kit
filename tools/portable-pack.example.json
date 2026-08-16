@@ -1,0 +1,190 @@
+﻿{
+    "_说明":  "公开中性模板：复制为 tools/portable-pack.json 后填写。不要在公开模板里写任何密钥，也不要预设旧服专用名称、版本或主客户端目录。",
+    "_字段说明":  {
+                  "packId":  "整合包内部短名，建议英文/数字/短横线；会写入 server-manifest.json，用来识别更新源。",
+                  "packName":  "整合包展示名；会用于玩家提示、实例名和更新清单。",
+                  "standardPackageName":  "规范导入包（mrpack/PCL）输出文件名前缀；留空则沿用 packName-standard-import/PCL-client。",
+                  "fullPackageName":  "完整懒人包输出文件名前缀；留空则沿用 packName-full-client。",
+                  "version":  "发布版本号；留空时脚本自动使用时间戳。",
+                  "minecraftVersion":  "Minecraft 或整合包主版本；用于 mrpack dependencies。",
+                  "sourceClient":  "主分发客户端目录；脚本会从这里复制 mods/config/resourcepacks 等。",
+                  "publishDir":  "更新源输出目录；更新服务会从这个目录读取 server-manifest.json 和文件。",
+                  "distDir":  "玩家包、mrpack、PCL 压缩包输出目录。",
+                  "includeRoots":  "从主分发客户端复制到更新源的目录列表（日常增量同步范围）。注意 TACZ 枪包（实例根 tacz/ 目录）刻意不放这里——枪皮体积大、基本不变，走「打包完整包」一次性发给玩家，不进日常增量更新（见 fullPack）。",
+                  "fullPack":  "「打包完整包」设置：直接从主客户端打一个自带全部大件（枪皮/光影/材质/资源包）的完整客户端 zip；extraRoots 是在 includeRoots 之外额外纳入的目录（默认加 tacz 枪皮）。",
+                  "includeFiles":  "从主分发客户端复制到更新源的单文件列表。",
+                  "excludeGlobs":  "发布时排除的路径；日志、存档、运行缓存、系统垃圾默认不进包。",
+                  "preserveLocalChangeGlobs":  "玩家本地修改后不被同步覆盖的路径；按键/options/资源包/光影/存档/模组配置等在这里保护。判定是三方对比：文件未被玩家改过则照常跟随服务端更新，只有玩家确实改过的才保留。",
+                  "preserveLocalDeletionGlobs":  "玩家本地删除后不被同步恢复的路径。",
+                  "forceSyncGlobs":  "强制同步路径：匹配的文件无视 preserveLocalChangeGlobs/preserveLocalDeletionGlobs，一律以服务端版本为准（覆盖前仍会备份）。服务端确需推送某个玩家常改的配置时，把该文件路径临时加进来发布一版，推完再移除。",
+                  "additiveDirs":  "玩家可以自由添加内容的目录；同步只确保目录存在，不清理玩家文件。",
+                  "forceDeleteGlobs":  "强制删除策略；只在必须清理危险/冲突文件时填写，删除前会备份。",
+                  "adoptExistingFiles":  "按 SHA1 接管本地已有文件，减少重复下载。",
+                  "cleanup":  "同步前后的修复策略，例如清理 Connector 缓存、禁用启动器修包索引、归档重复 mod。",
+                  "playerOptions":  "首次同步时写入的安全默认 options 项；默认不覆盖已有 options，避免改玩家按键。",
+                  "serverList":  "首次同步时写入 servers.dat；默认只在玩家没有服务器列表时写入。",
+                  "launchers":  "是否把 PCL/HMCL/Sakura 等启动器文件复制进发布源。",
+                  "mrpack":  "规范导入包设置；PCL/HMCL/Prism 优先使用。",
+                  "pcl":  "PCL 客户端压缩包设置。"
+              },
+    "packId":  "CHANGE-ME-pack-id",
+    "packName":  "CHANGE-ME Server Pack",
+    "standardPackageName":  "",
+    "fullPackageName":  "",
+    "version":  "",
+    "minecraftVersion":  "CHANGE-ME",
+    "loader":  {
+                   "_说明":  "按新服实际加载器填写，例如 fabric/forge/neoforge/quilt。",
+                   "type":  "CHANGE-ME",
+                   "version":  "CHANGE-ME"
+               },
+    "sourceClient":  ".\\CHANGE-ME-main-client",
+    "publishDir":  ".\\modpack-public\\portable",
+    "distDir":  ".\\dist",
+    "update":  {
+                   "_说明":  "更新服务地址配置；玩家包里的 UPDATE-URL 会根据这里生成。",
+                   "scheme":  "http",
+                   "host":  "CHANGE-ME-public-host",
+                   "port":  18088,
+                   "tokenFile":  ".update-server-token"
+               },
+    "server":  {
+                   "_说明":  "服务器展示名和玩家连接地址。",
+                   "name":  "CHANGE-ME Minecraft Server",
+                   "address":  "CHANGE-ME-public-host"
+               },
+    "includeRoots":  [
+                         "mods",
+                         "config",
+                         "defaultconfigs",
+                         "data",
+                         "resourcepacks",
+                         "datapacks",
+                         "kubejs",
+                         "scripts",
+                         "shaderpacks"
+                     ],
+    "includeFiles":  [
+                         "options.txt",
+                         "servers.dat"
+                     ],
+    "excludeGlobs":  [
+                         "logs/**",
+                         "crash-reports/**",
+                         "saves/**",
+                         "screenshots/**",
+                         "mods/.connector/**",
+                         "**/.connector/**",
+                         "**/.DS_Store",
+                         "**/Thumbs.db",
+                         "tacz/tacz_default_gun/**",
+                         "tacz/.export-state.json"
+                     ],
+    "preserveLocalChangeGlobs":  [
+                                     "options.txt",
+                                     ".minecraft/options.txt",
+                                     "servers.dat",
+                                     ".minecraft/servers.dat",
+                                     "saves/**",
+                                     "screenshots/**",
+                                     "resourcepacks/**",
+                                     "shaderpacks/**",
+                                     "schematics/**",
+                                     "XaeroWaypoints/**",
+                                     "XaeroWorldMap/**",
+                                     "local/**",
+                                     "fancymenu_data/**",
+                                     "config/**",
+                                     "defaultconfigs/**"
+                                 ],
+    "preserveLocalDeletionGlobs":  [
+                                       "options.txt",
+                                       ".minecraft/options.txt",
+                                       "servers.dat",
+                                       ".minecraft/servers.dat",
+                                       "saves/**",
+                                       "screenshots/**",
+                                       "resourcepacks/**",
+                                       "shaderpacks/**",
+                                       "schematics/**",
+                                       "XaeroWaypoints/**",
+                                       "XaeroWorldMap/**",
+                                       "local/**",
+                                       "fancymenu_data/**",
+                                       "tacz/**",
+                                       "mods/**"
+                                   ],
+    "additiveDirs":  [
+                         "saves",
+                         "screenshots",
+                         "resourcepacks",
+                         "shaderpacks",
+                         "schematics",
+                         "tacz",
+                         "XaeroWaypoints",
+                         "XaeroWorldMap",
+                         "local"
+                     ],
+    "forceDeleteGlobs":  [
+
+                         ],
+    "forceSyncGlobs":  [
+
+                       ],
+    "adoptExistingFiles":  true,
+    "cleanup":  {
+                    "_说明":  "玩家同步时自动修复常见环境问题。",
+                    "removeConnectorCache":  true,
+                    "disableLauncherRepairIndex":  true,
+                    "disableDuplicateMods":  true
+                },
+    "playerOptions":  {
+                          "_说明":  "首次同步才写；已有 options.txt 不覆盖，避免改玩家按键、鼠标、画质等个人习惯。",
+                          "apply":  "missing",
+                          "targets":  [
+                                          "options.txt"
+                                      ],
+                          "defaults":  {
+                                           "skipMultiplayerWarning":  "true",
+                                           "joinedFirstServer":  "true"
+                                       }
+                      },
+    "serverList":  {
+                       "_说明":  "首次同步写服务器列表；玩家后续删除或修改后不强行恢复。",
+                       "enabled":  true,
+                       "target":  "servers.dat",
+                       "name":  "CHANGE-ME Minecraft Server",
+                       "address":  "CHANGE-ME-public-host",
+                       "writeIfMissingOnly":  true
+                   },
+    "launchers":  {
+                      "_说明":  "这些文件如果存在于 sourceClient 根目录，会复制到发布源 _launchers。",
+                      "include":  true,
+                      "files":  [
+                                    "PCL.exe",
+                                    "Plain Craft Launcher.exe",
+                                    "SakuraLauncher.exe",
+                                    "HMCL.jar"
+                                ]
+                  },
+    "mrpack":  {
+                   "_说明":  "规范导入包；优先给 PCL/HMCL/Prism 导入。embedGlobs：这些文件强制内嵌进包（不写 URL+SHA1 清单条目），用于 I18n 汉化包等文件名不变、内容常变的挥发文件；不填时默认已含 I18n 转换包。",
+                   "enabled":  true,
+                   "summary":  "Portable Minecraft server import pack.",
+                   "embedGlobs":  [
+                                      "resourcepacks/Minecraft-Mod-Language-Modpack-Converted-*.zip"
+                                  ]
+               },
+    "pcl":  {
+                "_说明":  "PCL 客户端压缩包；内部是 .minecraft\\versions\\实例名 结构。",
+                "enabled":  true,
+                "instanceName":  "CHANGE-ME-instance-name"
+            },
+    "fullPack":  {
+                     "_说明":  "「打包完整包」用：直接从主客户端打一个自带全部大件（枪皮/光影/材质/各类资源包）的完整客户端 zip（PCL 结构），拉新玩家一次装好；之后日常增量同步只更新 mods/config 等轻量部分，枪皮等大件不随更新变动、也不会被同步删除。extraRoots 是在 includeRoots 之外额外纳入完整包的目录（枪皮 tacz 就靠它进包）。",
+                     "enabled":  true,
+                     "extraRoots":  [
+                                        "tacz"
+                                    ]
+                 }
+}

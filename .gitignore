@@ -1,0 +1,54 @@
+# Generated build output
+dist/
+tmp/
+modpack-public/
+
+# Local dependencies and bundled third-party runtimes
+tools/node_modules/
+tools/LLBot-CLI-win-x64/
+tools/launchers/
+tools/napcat/
+tools/*.jar
+tools/*.exe
+
+# Private/local configuration
+tools/portable-pack.json
+tools/ops-config.json
+tools/toolkit-update-source.txt
+.update-server-token
+server.properties
+ops.json
+usercache.json
+usernamecache.json
+whitelist.json
+banned-ips.json
+banned-players.json
+
+# Minecraft runtime data
+world/
+logs/
+backups/
+crash-reports/
+bluemap/
+libraries/
+mods/
+config/
+defaultconfigs/
+dynamic-data-pack-cache/
+local/
+data/
+客户端/
+
+# Local/editor noise
+*.log
+*.bak
+*.pid
+*.lock
+*.db
+*.sqlite
+__pycache__/
+tools/__pycache__/
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini

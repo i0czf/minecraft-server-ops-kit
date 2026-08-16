@@ -1,0 +1,33 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="All Rights Reserved - private server companion mod"
+
+[[mods]]
+modId="qqaspectindex"
+version="1.0.0"
+displayName="QQ Runtime Item Aspect Index"
+authors="chesir server toolkit"
+description='''
+服务端专用：按当前运行时注册表与 Thaumcraft 自身算法导出物品要素索引，供 QQ 查询使用。
+'''
+
+[[dependencies.qqaspectindex]]
+    modId="neoforge"
+    type="required"
+    versionRange="[21.1.235,)"
+    ordering="NONE"
+    side="SERVER"
+
+[[dependencies.qqaspectindex]]
+    modId="minecraft"
+    type="required"
+    versionRange="[1.21.1,1.22)"
+    ordering="NONE"
+    side="SERVER"
+
+[[dependencies.qqaspectindex]]
+    modId="thaumcraft"
+    type="required"
+    versionRange="[0.2.2,)"
+    ordering="AFTER"
+    side="SERVER"
