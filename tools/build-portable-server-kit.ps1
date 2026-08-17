@@ -485,6 +485,8 @@ New-Item -ItemType Directory -Force $dist | Out-Null
 
 $files = @(
     '一键便携-控制面板.bat',
+    '一键脚本\一键便携-启动Web控制面板.bat',
+    '一键脚本\一键便携-停止Web控制面板.bat',
     '一键脚本\一键便携-初始化配置.bat',
     '一键脚本\一键便携-仅发布更新.bat',
     '一键脚本\一键便携-生成玩家包.bat',
@@ -591,6 +593,9 @@ $files = @(
     'docs\recipe-index-本服配方助手.md',
     'tools\install-server.ps1',
     'tools\portable-control-panel.ps1',
+    'tools\portable-web-panel.ps1',
+    'tools\stop-portable-web-panel.ps1',
+    'tools\portable-web-panel.example.json',
     'tools\mod-release-manager.py',
     'tools\start-mod-release-manager.ps1',
     'tools\player-view-shot.ps1',

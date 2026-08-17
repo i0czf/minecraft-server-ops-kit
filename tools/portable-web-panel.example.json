@@ -1,0 +1,8 @@
+{
+  "_说明": "Web 面板默认只监听本机。需要外部端口转发时，把 bindAddress 改为 0.0.0.0，并优先使用 SSH/VPN 隧道。",
+  "bindAddress": "127.0.0.1",
+  "port": 58080,
+  "allowConsoleCommands": false,
+  "sessionMinutes": 720,
+  "maxLogLines": 200
+}
