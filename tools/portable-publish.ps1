@@ -113,10 +113,22 @@ function Copy-ManagedFile {
     Copy-FileIncremental -Source $source -Dest $dest -Rel $Rel
 }
 
+function Assert-PowerShellSyntax {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $tokens = $null
+    $errors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors) | Out-Null
+    if ($errors.Count -gt 0) {
+        $first = $errors | Select-Object -First 1
+        throw ("拒绝发布语法错误的 PowerShell 工具：{0}:{1}:{2} {3}" -f $Path, $first.Extent.StartLineNumber, $first.Extent.StartColumnNumber, $first.Message)
+    }
+}
+
 function Copy-ToolFile {
     param([string]$SourceName, [string]$DestinationName, [string]$DestinationRoot)
     $source = Join-Path $Root (Join-Path 'tools' $SourceName)
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "缺少便携工具文件：$source" }
+    if ($SourceName -like '*.ps1') { Assert-PowerShellSyntax -Path $source }
     $dest = Join-Path $DestinationRoot $DestinationName
     $rel = [System.IO.Path]::GetFullPath($dest).Substring([System.IO.Path]::GetFullPath($publishDir).TrimEnd('\', '/').Length).TrimStart('\', '/')
     Copy-FileIncremental -Source $source -Dest $dest -Rel $rel
@@ -174,7 +186,15 @@ function Get-UpdateToken {
 
 function Get-FileSha1 {
     param([string]$Path)
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA1).Hash.ToLowerInvariant()
+    $hash = [System.Security.Cryptography.SHA1]::Create()
+    $stream = $null
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        return ([System.BitConverter]::ToString($hash.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        if ($stream) { $stream.Dispose() }
+        $hash.Dispose()
+    }
 }
 
 function Assert-PublishedManifestIntegrity {
@@ -441,6 +461,7 @@ Copy-ToolFile -SourceName 'player-update-generic.ps1' -DestinationName 'player-u
 Copy-ToolFile -SourceName 'player-update-generic.py' -DestinationName 'player-update-generic.py' -DestinationRoot $updaterRoot
 Copy-ToolFile -SourceName 'portable-stage-daemon.ps1' -DestinationName 'portable-stage-daemon.ps1' -DestinationRoot $updaterRoot
 Copy-ToolFile -SourceName 'portable-stage-daemon.py' -DestinationName 'portable-stage-daemon.py' -DestinationRoot $updaterRoot
+Copy-ToolFile -SourceName 'portable-bootstrap-refresh.ps1' -DestinationName 'portable-bootstrap-refresh.ps1' -DestinationRoot $updaterRoot
 Copy-ToolFile -SourceName 'portable-windows-sync.bat' -DestinationName 'Windows-sync.bat' -DestinationRoot $updaterRoot
 Copy-ToolFile -SourceName 'portable-windows-sync.bat' -DestinationName '更新mod-Windows端.bat' -DestinationRoot $publishDir
 Copy-ToolFile -SourceName 'portable-macos-sync.command' -DestinationName 'macOS-sync.command' -DestinationRoot $updaterRoot
@@ -457,6 +478,17 @@ $token = Get-UpdateToken -TokenFile $tokenFile
 $manifestUrl = $scheme + "://" + $hostName + ":" + $port + "/" + $token + "/server-manifest.json"
 Write-Utf8NoBom -Path (Join-Path $publishDir 'UPDATE-URL.txt') -Value ($manifestUrl + "`r`n")
 Write-Utf8NoBom -Path (Join-Path $publishDir 'PORTABLE-UPDATE-URL.txt') -Value ($manifestUrl + "`r`n")
+$lanHost = [string](Get-ConfigValue -Object $update -Name 'lanHost' -Default '')
+$lanManifestUrl = ''
+if (-not [string]::IsNullOrWhiteSpace($lanHost)) {
+    $lanHost = $lanHost.Trim()
+    if ($lanHost -match '[\s/:\\]') { throw "update.lanHost 格式异常：$lanHost" }
+    $lanManifestUrl = $scheme + "://" + $lanHost + ":" + $port + "/" + $token + "/server-manifest.json"
+    Write-Utf8NoBom -Path (Join-Path $publishDir 'UPDATE-URL-LAN.txt') -Value ($lanManifestUrl + "`r`n")
+} else {
+    $staleLanUrl = Join-Path $publishDir 'UPDATE-URL-LAN.txt'
+    if (Test-Path -LiteralPath $staleLanUrl -PathType Leaf) { Remove-Item -LiteralPath $staleLanUrl -Force -ErrorAction SilentlyContinue }
+}
 $serverName = [string](Get-ConfigValue -Object $config.server -Name 'name' -Default $packName)
 $serverAddress = [string](Get-ConfigValue -Object $config.server -Name 'address' -Default $hostName)
 Write-Utf8NoBom -Path (Join-Path $publishDir 'SERVER.txt') -Value ($serverAddress + "`r`n")
@@ -467,6 +499,7 @@ Windows: run 更新mod-Windows端.bat.
 macOS: run 更新mod-Mac端.command if python3 is available.
 Self repair: run 一键客户端自助修复.bat; use -Fix only when repair is needed.
 Update URL: $manifestUrl
+LAN fallback: $(if ($lanManifestUrl) { $lanManifestUrl } else { 'not configured' })
 Server: $serverAddress
 "@
 
@@ -476,6 +509,7 @@ $base = $publishDir.TrimEnd('\', '/')
 foreach ($meta in @('UPDATE-URL.txt', 'PORTABLE-UPDATE-URL.txt', 'SERVER.txt', 'README-sync.txt', 'server-manifest.json', 'update-log.txt')) {
     Register-PublishedRel -Rel $meta
 }
+if ($lanManifestUrl) { Register-PublishedRel -Rel 'UPDATE-URL-LAN.txt' }
 Get-ChildItem -LiteralPath $publishDir -Recurse -File -Force | ForEach-Object {
     $rel = $_.FullName.Substring($base.Length).TrimStart('\', '/') -replace '\\', '/'
     if ($script:DesiredRelKeys.Contains($rel)) { return }
@@ -604,6 +638,7 @@ if ($oldFiles.Count -gt 0) {
         'update-log.txt' = $true
         'UPDATE-URL.txt' = $true
         'PORTABLE-UPDATE-URL.txt' = $true
+        'UPDATE-URL-LAN.txt' = $true
         'SERVER.txt' = $true
         'README-sync.txt' = $true
     }

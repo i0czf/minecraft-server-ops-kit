@@ -104,16 +104,60 @@ def join_safe(root: pathlib.Path, rel: str) -> pathlib.Path:
     return root.joinpath(*safe_rel(rel).split("/"))
 
 
-def read_update_url(root: pathlib.Path, override: str) -> str:
+_PRIMARY_UPDATE_URL_FILES = (
+    "UPDATE-URL.txt",
+    "PORTABLE-UPDATE-URL.txt",
+    "TFCR-update-url.txt",
+    "_updater/UPDATE-URL.txt",
+    "_updater/PORTABLE-UPDATE-URL.txt",
+)
+_FALLBACK_UPDATE_URL_FILES = (
+    "UPDATE-URL-LAN.txt",
+    "PORTABLE-UPDATE-URL-LAN.txt",
+    "_updater/UPDATE-URL-LAN.txt",
+    "_updater/PORTABLE-UPDATE-URL-LAN.txt",
+)
+
+
+def _url_lines(raw: str) -> list:
+    """Read one or more URL lines while tolerating CRLF and UTF-8 BOM files."""
+    values = []
+    for line in str(raw or "").replace("\r", "\n").split("\n"):
+        value = line.strip()
+        if value and not value.startswith("#"):
+            values.append(value)
+    return values
+
+
+def read_update_urls(root: pathlib.Path, override: str) -> list:
+    """Return the primary update URL plus optional LAN fallback URLs."""
+    raw_values = []
     if override:
-        return override.strip()
-    for rel in ("UPDATE-URL.txt", "PORTABLE-UPDATE-URL.txt", "TFCR-update-url.txt", "_updater/UPDATE-URL.txt", "_updater/PORTABLE-UPDATE-URL.txt"):
-        p = root.joinpath(*rel.split("/"))
-        if p.is_file():
-            value = p.read_text(encoding="utf-8-sig").strip()
-            if value:
-                return value
-    raise SystemExit("找不到 UPDATE-URL.txt。请确认玩家包没有被拆散，或使用 --manifest-url 手动指定 server-manifest.json 地址。")
+        raw_values.extend(_url_lines(override))
+    else:
+        for rel in _PRIMARY_UPDATE_URL_FILES + _FALLBACK_UPDATE_URL_FILES:
+            p = root.joinpath(*rel.split("/"))
+            if p.is_file():
+                try:
+                    raw_values.extend(_url_lines(p.read_text(encoding="utf-8-sig")))
+                except OSError:
+                    continue
+
+    out = []
+    seen = set()
+    for value in raw_values:
+        key = value.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(value)
+    if not out:
+        raise SystemExit("找不到 UPDATE-URL.txt。请确认玩家包没有被拆散，或使用 --manifest-url 手动指定 server-manifest.json 地址。")
+    return out
+
+
+def read_update_url(root: pathlib.Path, override: str) -> str:
+    """Backward-compatible single-URL helper for callers outside this script."""
+    return read_update_urls(root, override)[0]
 
 
 def url_for(base_url: str, rel: str) -> str:
@@ -861,32 +905,67 @@ def main() -> int:
     root = pathlib.Path(args.instance_dir).resolve()
     root.mkdir(parents=True, exist_ok=True)
     reset_download_policy()
-    manifest_url = read_update_url(root, args.manifest_url)
-    print(f"[同步] 清单：{mask_url(manifest_url)}")
+    manifest_urls = read_update_urls(root, args.manifest_url)
+    # 同一局域网访问自家公网地址经常没有 NAT 回环；若包内带 LAN 备用地址，
+    # 先试私网地址，外网用户最多付出一次很短的私网探测时间，再回到公网地址。
+    if not args.manifest_url:
+        private_urls = [
+            url for url in manifest_urls
+            if is_local_or_private_host(urllib.parse.urlparse(url).hostname or "")
+        ]
+        manifest_urls = private_urls + [url for url in manifest_urls if url not in private_urls]
+    print("[同步] 清单候选：" + "；".join(mask_url(url) for url in manifest_urls))
     proxy = get_proxy_url()
     if proxy:
         print(f"[同步] 已检测到系统代理 {describe_proxy(proxy)}，官方源走代理；家宽更新服务始终直连。")
     else:
         print("[同步] 未检测到系统代理，官方源直连（国内较慢会在 8 秒内回落更新服务）。")
-    # 更新源重启/隧道瞬断会短暂 503，重试几次；最终失败给干净提示而不是吓人的 traceback。
+    # 更新源重启/隧道瞬断会短暂 503。每个候选只重试一次，避免把一个
+    # 不可达的公网地址重复等很久；成功后本轮所有私有文件都沿用同一地址。
     manifest = None
+    selected_manifest_url = ""
     last_exc = None
-    for attempt in range(3):
-        try:
-            raw = fetch_bytes(manifest_url, timeout=12)
-            manifest = json.loads(raw.decode("utf-8-sig"))
+    endpoint_errors = []
+    for candidate in manifest_urls:
+        for attempt in range(2):
+            try:
+                raw = fetch_bytes(candidate, timeout=8)
+                candidate_manifest = json.loads(raw.decode("utf-8-sig"))
+                if not candidate_manifest.get("files"):
+                    raise ValueError("manifest 没有 files")
+                manifest = candidate_manifest
+                selected_manifest_url = candidate
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 0:
+                    time.sleep(1)
+        if manifest is not None:
             break
-        except Exception as exc:
-            last_exc = exc
-            if attempt < 2:
-                print(f"[同步] 清单获取失败（第 {attempt + 1} 次）：{exc}；3 秒后重试...")
-                time.sleep(3)
+        endpoint_errors.append(f"{mask_url(candidate)} -> {last_exc}")
+
+    # 完整懒人包通常自带 server-manifest.json。更新源暂时不可达时，
+    # 用本地清单继续做哈希对账，已有文件可以直接完成同步，避免把整包判成失败。
+    if manifest is None:
+        local_manifest = root / "server-manifest.json"
+        try:
+            if local_manifest.is_file():
+                local_candidate = json.loads(local_manifest.read_text(encoding="utf-8-sig"))
+                if local_candidate.get("files"):
+                    manifest = local_candidate
+                    selected_manifest_url = manifest_urls[0]
+                    print("[降级] 更新源暂时不可达，改用包内 server-manifest.json 做本地对账；缺失文件仍需更新源恢复后补下。")
+        except Exception:
+            manifest = None
     if manifest is None:
         raise SystemExit(
-            f"[同步] 清单获取失败：{last_exc}。"
-            "若你和服务器在同一局域网，路由器回环（访问自家公网 IP）常常会超时，可把 UPDATE-URL 临时改成服机局域网地址后再试；"
+            f"[同步] 清单获取失败：{last_exc}。已尝试 {len(manifest_urls)} 个更新地址。"
+            "若你和服务器在同一局域网，脚本会优先尝试 UPDATE-URL-LAN.txt；仍失败请检查服机局域网地址。"
             "若在外网，请管理员确认路由器已把 TCP 18088 转到服机，并等 DDNS 生效后再试。"
         )
+    manifest_url = selected_manifest_url
+    if manifest_url != manifest_urls[0]:
+        print(f"[同步] 已切换到可用备用地址：{mask_url(manifest_url)}")
     files = manifest.get("files") or []
     if not files:
         raise SystemExit("清单没有 files 文件列表。")

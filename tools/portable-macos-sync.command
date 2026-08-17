@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# @version 9
+# @version 10
 set -e
 cd "$(dirname "$0")"
 SCRIPT_DIR="$PWD"
@@ -15,10 +15,31 @@ echo "============================================================"
 echo "实例目录: $INSTANCE_DIR"
 echo
 
-MANIFEST_URL="${PORTABLE_MANIFEST_URL:-}"
-for candidate in "$INSTANCE_DIR/UPDATE-URL.txt" "$INSTANCE_DIR/PORTABLE-UPDATE-URL.txt" "$INSTANCE_DIR/TFCR-update-url.txt" "$SCRIPT_DIR/UPDATE-URL.txt" "$SCRIPT_DIR/PORTABLE-UPDATE-URL.txt" "$SCRIPT_DIR/TFCR-update-url.txt"; do
-  if [ -z "$MANIFEST_URL" ] && [ -f "$candidate" ]; then
-    MANIFEST_URL="$(tr -d '\r\n' < "$candidate")"
+MANIFEST_URLS="${PORTABLE_MANIFEST_URL:-}"
+append_manifest_url() {
+  local value="$1"
+  value="$(printf '%s' "$value" | tr -d '\r\n')"
+  [ -z "$value" ] && return 0
+  case "$MANIFEST_URLS" in
+    *"$value"*) return 0 ;;
+  esac
+  if [ -z "$MANIFEST_URLS" ]; then
+    MANIFEST_URLS="$value"
+  else
+    MANIFEST_URLS="${MANIFEST_URLS}"$'\x1f'"$value"
+  fi
+}
+if [ -z "$MANIFEST_URLS" ]; then
+  for candidate in "$INSTANCE_DIR/UPDATE-URL.txt" "$INSTANCE_DIR/PORTABLE-UPDATE-URL.txt" "$INSTANCE_DIR/TFCR-update-url.txt" "$SCRIPT_DIR/UPDATE-URL.txt" "$SCRIPT_DIR/PORTABLE-UPDATE-URL.txt" "$SCRIPT_DIR/TFCR-update-url.txt"; do
+    if [ -f "$candidate" ]; then
+      append_manifest_url "$(head -n 1 "$candidate")"
+      break
+    fi
+  done
+fi
+for candidate in "$INSTANCE_DIR/UPDATE-URL-LAN.txt" "$INSTANCE_DIR/PORTABLE-UPDATE-URL-LAN.txt" "$SCRIPT_DIR/UPDATE-URL-LAN.txt" "$SCRIPT_DIR/PORTABLE-UPDATE-URL-LAN.txt"; do
+  if [ -f "$candidate" ]; then
+    append_manifest_url "$(head -n 1 "$candidate")"
   fi
 done
 
@@ -28,9 +49,25 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
+python_source_ok() {
+  python3 -c 'import pathlib,sys; compile(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8-sig"), sys.argv[1], "exec")' "$1" >/dev/null 2>&1
+}
+# 旧版本自更新曾经原地覆盖正在执行的 Python 文件，异常中断会留下半个文件。
+# 完整包根目录保留一份同源副本；若 _updater 副本无法解析，先原子恢复它。
+if [ "$SCRIPT_DIR" != "$INSTANCE_DIR" ] && [ -f "$SCRIPT_DIR/player-update-generic.py" ] && [ -f "$INSTANCE_DIR/player-update-generic.py" ]; then
+  if ! python_source_ok "$SCRIPT_DIR/player-update-generic.py" && python_source_ok "$INSTANCE_DIR/player-update-generic.py"; then
+    repair_tmp="$SCRIPT_DIR/.player-update-generic.py.repair.$$"
+    if cp "$INSTANCE_DIR/player-update-generic.py" "$repair_tmp" 2>/dev/null; then
+      chmod +x "$repair_tmp" 2>/dev/null || true
+      mv -f "$repair_tmp" "$SCRIPT_DIR/player-update-generic.py"
+      echo "[修复] 已从包内副本恢复损坏的 _updater/player-update-generic.py。"
+    fi
+  fi
+fi
+
 set +e
-python3 - "$MANIFEST_URL" "$SCRIPT_DIR" "$0" <<'PY'
-import hashlib, http.client, os, pathlib, re, shutil, socket, stat, sys, tempfile, time, urllib.parse, urllib.request
+python3 - "$MANIFEST_URLS" "$SCRIPT_DIR" "$0" <<'PY'
+import hashlib, http.client, ipaddress, os, pathlib, re, shutil, socket, stat, sys, tempfile, time, urllib.parse, urllib.request
 
 # 更新源是家宽直连地址，绝不走系统代理：macOS 上 urllib 会自动读系统代理（Clash“设为系统
 # 代理”），代理到不了 18088 就把自刷新请求整齐变成 503。空 ProxyHandler 强制直连、绕过代理。
@@ -70,13 +107,48 @@ def fetch_bytes(url, timeout=12):
     with urllib.request.urlopen(url, timeout=timeout) as response:
         return response.read()
 
-manifest_url = sys.argv[1].strip()
+manifest_urls = [value for value in sys.argv[1].split("\x1f") if value.strip()]
+def is_private_update_url(url):
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    except Exception:
+        return False
+    if host in ("localhost", "127.0.0.1", "::1") or host.endswith(".local"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_private
+    except ValueError:
+        return False
+manifest_urls = ([url for url in manifest_urls if is_private_update_url(url)] +
+                 [url for url in manifest_urls if not is_private_update_url(url)])
 script_dir = pathlib.Path(sys.argv[2]).resolve()
 self_path = pathlib.Path(sys.argv[3]).resolve()
-if not manifest_url:
+if not manifest_urls:
     print("[更新器] 未找到 UPDATE-URL.txt，将使用包内同步脚本。")
     raise SystemExit(0)
-base = manifest_url.rsplit("/", 1)[0] + "/"
+selected_manifest_url = None
+manifest_errors = []
+def mask_url(url):
+    parsed = urllib.parse.urlsplit(url)
+    parts = parsed.path.split("/")
+    if len(parts) > 2 and parts[1]:
+        parts[1] = "***"
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/".join(parts), parsed.query, parsed.fragment))
+
+for candidate in manifest_urls:
+    try:
+        # 先探测一次清单；成功后整轮自刷新复用这个地址，避免五个文件各自刷同一条错误。
+        fetch_bytes(candidate, timeout=8)
+        selected_manifest_url = candidate
+        break
+    except Exception as exc:
+        manifest_errors.append(f"{mask_url(candidate)}: {exc}")
+if not selected_manifest_url:
+    print("[更新器] 更新源暂时不可达，跳过自刷新（已保留本地脚本）：" + "；".join(manifest_errors))
+    raise SystemExit(0)
+if selected_manifest_url != manifest_urls[0]:
+    print("[更新器] 已切换到备用更新地址（通常是局域网地址）。")
+base = selected_manifest_url.rsplit("/", 1)[0] + "/"
 
 def version(path):
     try:
@@ -219,8 +291,6 @@ exit "$status"
 # 因此运行本代代码的客户端更新到未来版本不再受「字节偏移/只能改尾部」限制，
 # 但仍须保持 LF 换行 + UTF-8 无 BOM。
 #
-# 版本号头为什么还是 8：旧代（copy2 原地覆盖自身）客户端一旦看到更高的远端
-# 版本号就会原地自更新，而 bash 在外部命令结束后会按旧字节偏移从磁盘重读脚本
-# （2026-07-06 实测复现：v8→更长的 v9 过渡运行直接 unexpected EOF，重启失效），
-# 所以头保持 8 让旧代刷新按兵不动，改由 sync 阶段的 rename 安全换入本文件。
-# 下次真正需要 exec 重启的发布再把头递增到 9（届时存量客户端均已是 os.replace 代码）。
+# 版本号头在 v9 过渡期曾暂时冻结，避免旧代 copy2 原地覆盖脚本后按旧字节偏移
+# 继续解析而出现 unexpected EOF。当前自更新已改成同目录临时文件 + os.replace，
+# v10 用于把“局域网备用源 + 单次预探测”安全推送到存量 Mac 客户端。

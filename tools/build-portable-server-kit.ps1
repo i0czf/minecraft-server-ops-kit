@@ -525,6 +525,7 @@ $files = @(
     'tools\player-update-generic.py',
     'tools\portable-stage-daemon.ps1',
     'tools\portable-stage-daemon.py',
+    'tools\portable-bootstrap-refresh.ps1',
     'tools\portable-windows-sync.bat',
     'tools\portable-macos-sync.command',
     'tools\portable-run-server.ps1',

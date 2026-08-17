@@ -15,6 +15,7 @@ import argparse
 import datetime as dt
 import fnmatch
 import hashlib
+import ipaddress
 import json
 import os
 import pathlib
@@ -40,6 +41,19 @@ _OFFICIAL_SKIP = False
 
 META_SKIP = {"server-manifest.json", "update-log.txt"}
 STAGE_META = {"READY.json", "daemon.lock", "daemon.log"}
+_PRIMARY_UPDATE_URL_FILES = (
+    "UPDATE-URL.txt",
+    "PORTABLE-UPDATE-URL.txt",
+    "TFCR-update-url.txt",
+    "_updater/UPDATE-URL.txt",
+    "_updater/PORTABLE-UPDATE-URL.txt",
+)
+_FALLBACK_UPDATE_URL_FILES = (
+    "UPDATE-URL-LAN.txt",
+    "PORTABLE-UPDATE-URL-LAN.txt",
+    "_updater/UPDATE-URL-LAN.txt",
+    "_updater/PORTABLE-UPDATE-URL-LAN.txt",
+)
 
 
 def sha1(path: pathlib.Path) -> str:
@@ -71,17 +85,68 @@ def glob_match(rel: str, globs) -> bool:
     return any(fnmatch.fnmatchcase(rel, str(g).replace("\\", "/").lstrip("/")) for g in globs or [])
 
 
-def read_update_url(root: pathlib.Path, override: str) -> str:
-    if override:
-        return override.strip()
-    for rel in ("UPDATE-URL.txt", "PORTABLE-UPDATE-URL.txt", "TFCR-update-url.txt",
-                "_updater/UPDATE-URL.txt", "_updater/PORTABLE-UPDATE-URL.txt"):
+def read_update_urls(root: pathlib.Path, override: str) -> list:
+    if override and override.strip():
+        return [override.strip()]
+    urls = []
+    seen = set()
+    for rel in _PRIMARY_UPDATE_URL_FILES + _FALLBACK_UPDATE_URL_FILES:
         p = root.joinpath(*rel.split("/"))
-        if p.is_file():
-            v = p.read_text(encoding="utf-8-sig", errors="ignore").strip()
-            if v:
-                return v
-    return ""
+        if not p.is_file():
+            continue
+        try:
+            lines = p.read_text(encoding="utf-8-sig", errors="ignore").splitlines()
+        except Exception:
+            continue
+        for raw in lines:
+            value = raw.strip()
+            if not value or value.startswith("#"):
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            urls.append(value)
+    return urls
+
+
+def read_update_url(root: pathlib.Path, override: str) -> str:
+    """Backward-compatible single-URL accessor for older callers."""
+    urls = read_update_urls(root, override)
+    return urls[0] if urls else ""
+
+
+def is_private_update_url(url: str) -> bool:
+    try:
+        host = (urllib.parse.urlparse(str(url).strip()).hostname or "").lower()
+    except Exception:
+        return False
+    if host in ("localhost", "127.0.0.1", "::1") or host.endswith(".local"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_private
+    except ValueError:
+        return False
+
+
+def order_update_urls(urls: list) -> list:
+    private = [url for url in urls if is_private_update_url(url)]
+    public = [url for url in urls if not is_private_update_url(url)]
+    return private + public
+
+
+def probe_manifest_url(url: str) -> bool:
+    """Probe once and require a JSON manifest before starting a long-lived daemon."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _STAGE_UA, "Cache-Control": "no-cache"})
+        with _DIRECT_OPENER.open(req, timeout=8) as resp:
+            if getattr(resp, "status", 200) != 200:
+                return False
+            payload = resp.read()
+        manifest = json.loads(payload.decode("utf-8-sig", errors="ignore"))
+        return isinstance(manifest, dict) and isinstance(manifest.get("files"), list)
+    except Exception:
+        return False
 
 
 def log(log_path: pathlib.Path, msg: str):
@@ -563,10 +628,23 @@ def main() -> int:
         return 0
 
     stage_root.mkdir(parents=True, exist_ok=True)
-    manifest_url = read_update_url(instance_root, args.manifest_url)
-    if not manifest_url:
+    manifest_urls = read_update_urls(instance_root, args.manifest_url)
+    if not manifest_urls:
         log(log_path, "未找到 UPDATE-URL，暂存 daemon 退出。")
         return 0
+    manifest_urls = order_update_urls(manifest_urls)
+    manifest_url = ""
+    selected_index = -1
+    for index, candidate in enumerate(manifest_urls):
+        if probe_manifest_url(candidate):
+            manifest_url = candidate
+            selected_index = index
+            break
+    if not manifest_url:
+        log(log_path, "更新源暂时不可达，暂存 daemon 本轮不启动；下次玩家同步会重试。")
+        return 0
+    if selected_index > 0:
+        log(log_path, "已切换到备用更新地址（通常是局域网地址）。")
     run_watch(instance_root, stage_root, ready_path, notice_path, lock_path, log_path,
               manifest_url, args.interval_seconds, args.max_runtime_minutes,
               args.grace_minutes, args.idle_exit_checks)

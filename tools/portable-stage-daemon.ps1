@@ -52,7 +52,15 @@ function Join-SafeRel {
 function Get-Sha1 {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return "" }
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA1).Hash.ToLowerInvariant()
+    $hash = [System.Security.Cryptography.SHA1]::Create()
+    $stream = $null
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        return ([System.BitConverter]::ToString($hash.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        if ($stream) { $stream.Dispose() }
+        $hash.Dispose()
+    }
 }
 
 function Test-GlobMatch {
@@ -66,18 +74,74 @@ function Test-GlobMatch {
     return $false
 }
 
+function Read-UpdateUrls {
+    param([string]$Root, [string]$Override)
+    $urls = New-Object 'System.Collections.Generic.List[string]'
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $add = {
+        param([string]$Value)
+        $v = ([string]$Value).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($v) -and -not $v.StartsWith('#') -and $seen.Add($v)) { [void]$urls.Add($v) }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Override)) {
+        & $add $Override
+        return @($urls.ToArray())
+    }
+    # TFCR-update-url.txt 是旧周目玩家包留下的文件名，老玩家实例里还有——请勿删除。
+    $primary = @('UPDATE-URL.txt', 'PORTABLE-UPDATE-URL.txt', 'TFCR-update-url.txt', '_updater\UPDATE-URL.txt', '_updater\PORTABLE-UPDATE-URL.txt')
+    $fallback = @('UPDATE-URL-LAN.txt', 'PORTABLE-UPDATE-URL-LAN.txt', '_updater\UPDATE-URL-LAN.txt', '_updater\PORTABLE-UPDATE-URL-LAN.txt')
+    foreach ($rel in ($primary + $fallback)) {
+        $p = Join-Path $Root $rel
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { continue }
+        try {
+            foreach ($line in ((Get-Content -LiteralPath $p -Encoding UTF8 -ErrorAction Stop) -split "`r?`n")) { & $add $line }
+        } catch {}
+    }
+    return @($urls.ToArray())
+}
+
 function Read-UpdateUrl {
     param([string]$Root, [string]$Override)
-    if (-not [string]::IsNullOrWhiteSpace($Override)) { return $Override.Trim() }
-    # TFCR-update-url.txt 是旧周目玩家包留下的文件名，老玩家实例里还有——请勿删除（同 player-update-generic.ps1）
-    foreach ($rel in @('UPDATE-URL.txt', 'PORTABLE-UPDATE-URL.txt', 'TFCR-update-url.txt', '_updater\UPDATE-URL.txt', '_updater\PORTABLE-UPDATE-URL.txt')) {
-        $p = Join-Path $Root $rel
-        if (Test-Path -LiteralPath $p -PathType Leaf) {
-            $v = (Get-Content -LiteralPath $p -Raw -Encoding UTF8).Trim()
-            if (-not [string]::IsNullOrWhiteSpace($v)) { return $v }
-        }
-    }
+    $urls = @(Read-UpdateUrls -Root $Root -Override $Override)
+    if ($urls.Count -gt 0) { return [string]$urls[0] }
     return ""
+}
+
+function Test-PrivateUpdateUrl {
+    param([string]$Url)
+    try { $hostName = ([Uri]$Url).Host.ToLowerInvariant() } catch { return $false }
+    if ($hostName -in @('localhost', '127.0.0.1', '::1') -or $hostName.EndsWith('.local')) { return $true }
+    if ($hostName -match '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.)') { return $true }
+    if ($hostName -match '^(fc|fd|fe80:)') { return $true }
+    return $false
+}
+
+function Test-ManifestUrl {
+    param([string]$Url)
+    $request = $null
+    $response = $null
+    $stream = $null
+    $reader = $null
+    try {
+        $request = [System.Net.HttpWebRequest]::Create($Url)
+        $request.Proxy = $null
+        $request.Method = 'GET'
+        $request.Timeout = 8000
+        $request.ReadWriteTimeout = 8000
+        $request.UserAgent = 'portable-server-kit-stage/1.0'
+        $response = $request.GetResponse()
+        $stream = $response.GetResponseStream()
+        $reader = New-Object -TypeName System.IO.StreamReader -ArgumentList @($stream, (New-Object System.Text.UTF8Encoding($false)), $true)
+        $manifest = $reader.ReadToEnd() | ConvertFrom-Json
+        return ($null -ne $manifest -and $null -ne $manifest.files)
+    } catch {
+        return $false
+    } finally {
+        if ($reader) { $reader.Dispose() }
+        if ($stream) { $stream.Dispose() }
+        if ($response) { $response.Dispose() }
+        if ($request) { try { $request.Abort() } catch {} }
+    }
 }
 
 function Join-UrlPath {
@@ -324,12 +388,28 @@ if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
 }
 Set-Content -LiteralPath $lockPath -Value ([string]$PID) -Encoding ASCII
 
-$manifestUrl = Read-UpdateUrl -Root $instanceRoot -Override $ManifestUrl
-if ([string]::IsNullOrWhiteSpace($manifestUrl)) {
+$manifestUrls = @(Read-UpdateUrls -Root $instanceRoot -Override $ManifestUrl)
+if ($manifestUrls.Count -eq 0) {
     Write-Log "未找到 UPDATE-URL，暂存 daemon 退出。"
     Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
     return
 }
+$manifestUrls = @(@($manifestUrls | Where-Object { Test-PrivateUpdateUrl $_ }) + @($manifestUrls | Where-Object { -not (Test-PrivateUpdateUrl $_) }))
+$manifestUrl = ""
+$selectedIndex = -1
+for ($i = 0; $i -lt $manifestUrls.Count; $i++) {
+    if (Test-ManifestUrl -Url ([string]$manifestUrls[$i])) {
+        $manifestUrl = [string]$manifestUrls[$i]
+        $selectedIndex = $i
+        break
+    }
+}
+if ([string]::IsNullOrWhiteSpace($manifestUrl)) {
+    Write-Log "更新源暂时不可达，暂存 daemon 本轮不启动；下次玩家同步会重试。"
+    Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+    return
+}
+if ($selectedIndex -gt 0) { Write-Log "已切换到备用更新地址（通常是局域网地址）。" }
 $baseUrl = $manifestUrl.Substring(0, $manifestUrl.LastIndexOf('/') + 1)
 Write-Log ("暂存 daemon 启动 (PID $PID)，间隔 ${IntervalSeconds}s，最长 ${MaxRuntimeMinutes} 分钟。")
 
