@@ -212,4 +212,6 @@ javac --add-modules jdk.httpserver -encoding UTF-8 `
 
 ## 许可证与第三方组件
 
-本项目的正式许可证将在首次公开发布前补充。仓库中的第三方依赖、QQ/LLBot、Minecraft 模组和启动器不等同于本项目代码，使用和再分发时请遵守各自许可证及服务条款。
+本项目原创代码采用 [PolyForm Noncommercial License 1.0.0](LICENSE)，版权所有 © 2026 i0czf。该许可证允许非商业目的下载、使用、修改和再分发；商业使用需要事先获得版权方书面许可。
+
+许可证仅适用于本项目原创代码。仓库中的第三方依赖、QQ/LLBot、Minecraft 模组和启动器不等同于本项目代码，使用和再分发时请遵守各自许可证及服务条款。
