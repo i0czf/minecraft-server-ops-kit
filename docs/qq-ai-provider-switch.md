@@ -78,8 +78,9 @@ powershell -ExecutionPolicy Bypass -File .\tools\set-ai-provider.ps1 -Provider g
 
 - **数字从哪来**：模型接口自己返回的 `usage` 字段，即厂商的计费口径。不做本地估算——按字数估的 token 与实际扣费必然对不上。DeepSeek 的 `prompt_cache_hit_tokens` 与 OpenAI 兼容的 `prompt_tokens_details.cached_tokens` 都能识别。
 - **为什么显示「N 次请求」**：一次提问在 agent 循环里会请求模型多次（每步工具调用都要把全部上下文重发一遍），token 是逐次累加的。只看最后一次会严重低估。
-- **缓存命中率**：命中率是整次提问的加权值（第一步几乎全未命中，后续步骤复用同一段前缀），它直接对应省下多少钱：命中部分按 `priceCacheIn` 计价，DeepSeek 只要全价的 2%。厂商报了缓存字段就一定显示，哪怕是 0%——那说明每个输入 token 都在按全价扣，是该看见的信号；压根不报缓存的厂商则整段省略，不拿 0 冒充「没命中」。
-- **单价填在哪**：`ai.providers.<预设>` 下的 `priceIn` / `priceCacheIn` / `priceOut`（每百万 token）与 `currency`（`CNY` 或 `USD`）。美元按 `ai.usdToCny` 折人民币。`priceCacheIn` 不填就按 `priceIn` 算。
+- **缓存命中率**：命中率是整次提问的加权值（第一步几乎全未命中，后续步骤复用同一段前缀），它直接对应省下多少钱：命中部分按 `priceCacheIn` 计价。DeepSeek V4 的官方缓存价与未命中价都以官方页面为准，不能把旧的固定比例写死。厂商报了缓存字段就一定显示，哪怕是 0%——那说明每个输入 token 都在按全价扣，是该看见的信号；压根不报缓存的厂商则整段省略，不拿 0 冒充「没命中」。
+- **DeepSeek 官方价自动同步**：`ai.officialPricing.enabled=true` 后，QQ 桥启动时及每 `refreshMinutes` 分钟读取官方价目页，校验模型、价格和北京时间峰值时段后更新 V4 Flash/Pro；校验失败保留当前回退价，不影响 AI 请求。每次模型响应按响应时刻的北京时间选择峰/谷价；`!ai` 可查看当前价与同步状态。
+- **单价填在哪**：普通预设使用 `ai.providers.<预设>` 下的 `priceIn` / `priceCacheIn` / `priceOut`（每百万 token）与 `currency`（`CNY` 或 `USD`）。DeepSeek V4 还支持 `pricePeakIn` / `pricePeakCacheIn` / `pricePeakOut` 作为峰值回退价；官方同步成功后会覆盖直连 V4 预设的运行时价格。美元按 `ai.usdToCny` 折人民币，`priceCacheIn` 不填就按 `priceIn` 算。
 - **没填价**：只报 token，金额位置写明去哪填，不会按估价编一个数字。本机 ollama 填 0 则显示「¥0（本机模型，不计费）」。
 - **本机 CLI**：`codex-local` 从 `turn.completed.usage` 读取输入、缓存输入和输出 token；`grok-local` 因本机接口不返回 token 数，不带用量尾巴。两者的耗时都由 QQ 桥本地计时器统计。
 - `codex-local` 当前锁定 `gpt-5.6-luna` + `max`，价格为输入 `$1`、缓存输入 `$0.1`、输出 `$6`（每百万 token）；页脚显示的是按 API 价格折算的“约”值，ChatGPT 登录态的实际账户扣费/额度以账号计划为准。

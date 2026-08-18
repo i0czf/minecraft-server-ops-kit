@@ -323,12 +323,19 @@
                        "notify":  true
                    },
     "ai":  {
-               "_说明":  "AI 运维助手（OpenAI 兼容智能体）。开启后群主/管理员 @机器人 或用 !问/!ask \u003c问题\u003e 触发，机器人用 function calling 真实调用工具多轮查证后回帖。【换模型只改一处】把下面的 provider 改成 providers 里的某个键名即可（默认 deepseek），接口地址/模型/密钥都跟着走；改完重跑一次运维监控（一键脚本\\一键便携-启动所有运维.bat，或重启服务器）就生效——它发现本文件变了会自动重编译重启 QQ 桥。生效后群里发 !ai 可查当前用的哪家、密钥有没有拿到、还能切到哪些；也可命令行自查：java -cp tmp/java-classes QQConsoleBridge --ai-status tools/ops-config.json。visionProvider 是「当前模型不支持看图时，带图提问临时改用的那家」，留空则带图时忽略图片并如实告知。要接新厂商就在 providers 里加一个键：任何 OpenAI 兼容的 chat/completions 接口都行，但必须支持 function calling（工具调用），否则智能体查不了服务器。apiKey 强烈建议留空、改用 apiKeyEnv 指定的环境变量，避免明文密钥进配置文件（打包时也会被强制清空）。showUsage=true 时每条 AI 回答末尾附一行本次用量（token 数取自接口返回的 usage，agent 多步会累加）和折合人民币的花费，单价见下面各预设的 priceIn/priceCacheIn/priceOut；usdToCny 是美元计价模型折人民币的汇率。本机 Codex/Grok CLI 后端走登录态、接口不返回 token 数，那两种模式不带用量尾巴。",
+               "_说明":  "AI 运维助手（OpenAI 兼容智能体）。开启后群主/管理员 @机器人 或用 !问/!ask \u003c问题\u003e 触发，机器人用 function calling 真实调用工具多轮查证后回帖。【换模型只改一处】把下面的 provider 改成 providers 里的某个键名即可（默认 deepseek），接口地址/模型/密钥都跟着走；改完重跑一次运维监控（一键脚本\\一键便携-启动所有运维.bat，或重启服务器）就生效——它发现本文件变了会自动重编译重启 QQ 桥。生效后群里发 !ai 可查当前用的哪家、密钥有没有拿到、还能切到哪些；也可命令行自查：java -cp tmp/java-classes QQConsoleBridge --ai-status tools/ops-config.json。visionProvider 是「当前模型不支持看图时，带图提问临时改用的那家」，留空则带图时忽略图片并如实告知。要接新厂商就在 providers 里加一个键：任何 OpenAI 兼容的 chat/completions 接口都行，但必须支持 function calling（工具调用），否则智能体查不了服务器。apiKey 强烈建议留空、改用 apiKeyEnv 指定的环境变量，避免明文密钥进配置文件（打包时也会被强制清空）。showUsage=true 时每条 AI 回答末尾附一行本次用量（token 数取自接口返回的 usage，agent 多步会累加）和折合人民币的花费；DeepSeek V4 直连预设会按官方页面自动同步空闲/高峰价，普通单价只作回退；usdToCny 是美元计价模型折人民币的汇率。本机 Codex/Grok CLI 后端走登录态、接口不返回 token 数，那两种模式不带用量尾巴。",
                "enabled":  false,
+               "officialPricing":  {
+                                      "_说明":  "仅对直连 api.deepseek.com 的 V4 Flash/Pro 生效。启动时及每 refreshMinutes 分钟读取 DeepSeek 官方中文价目页；校验失败时保留当前配置价。",
+                                      "enabled":  true,
+                                      "url":  "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
+                                      "refreshMinutes":  360,
+                                      "timeoutSeconds":  12
+                                  },
                "provider":  "deepseek",
                "visionProvider":  "qwen",
                "providers":  {
-                                 "_说明":  "模型预设表：键名自取，被上面的 provider / visionProvider 引用。vision=true 表示该模型能直接读图片（不确定就填 false，带图提问会自动转给视觉备选）。带 ✎ 的 model 只是示例，实际以各家官方文档的模型 ID 为准；改完发 !ai 就能看到有没有生效。【计费】priceIn/priceCacheIn/priceOut 是每百万 token 的单价，currency 填 CNY 或 USD（USD 按上面的 usdToCny 折人民币）；priceCacheIn 是命中缓存部分的输入价，不填就按 priceIn 算。token 数取自接口自己返回的 usage 字段（不是本地估算），一次提问 agent 跑几步就累加几次。价格填错只影响显示的金额，不影响真实扣费；没填价就只报 token 不报钱。各家会调价，以官方计费页为准。",
+                                 "_说明":  "模型预设表：键名自取，被上面的 provider / visionProvider 引用。vision=true 表示该模型能直接读图片（不确定就填 false，带图提问会自动转给视觉备选）。带 ✎ 的 model 只是示例，实际以各家官方文档的模型 ID 为准；改完发 !ai 就能看到有没有生效。【计费】普通预设的 priceIn/priceCacheIn/priceOut 是每百万 token 的回退单价，currency 填 CNY 或 USD（USD 按上面的 usdToCny 折人民币）；DeepSeek 直连预设另外有 pricePeakIn/pricePeakCacheIn/pricePeakOut，官方同步成功后按北京时区每次请求的峰谷时段选价。token 数取自接口自己返回的 usage 字段（不是本地估算），一次提问 agent 跑几步就累加几次。价格填错只影响显示的金额，不影响真实扣费；没填价就只报 token 不报钱。各家会调价，以官方计费页为准。",
                                  "deepseek":  {
                                                   "_说明":  "DeepSeek 官方群聊默认档：V4-Flash，关思考，求快。工具调用稳，不能看图。复杂排查请切 deepseek-pro。",
                                                   "apiUrl":  "https://api.deepseek.com/v1/chat/completions",
@@ -339,9 +346,12 @@
                                                   "thinking":  "disabled",
                                                   "vision":  false,
                                                   "currency":  "CNY",
-                                                  "priceIn":  1,
-                                                  "priceCacheIn":  0.02,
-                                                  "priceOut":  2
+                                                  "priceIn":  1.5,
+                                                  "priceCacheIn":  0.05,
+                                                  "priceOut":  4.5,
+                                                  "pricePeakIn":  3.0,
+                                                  "pricePeakCacheIn":  0.10,
+                                                  "pricePeakOut":  9.0
                                               },
                                  "deepseek-pro":  {
                                                       "_说明":  "DeepSeek 推理档：慢但更会推，排查崩溃/复杂配置时临时切过来。",
@@ -353,9 +363,12 @@
                                                       "thinking":  "enabled",
                                                       "vision":  false,
                                                       "currency":  "CNY",
-                                                      "priceIn":  3,
-                                                      "priceCacheIn":  0.025,
-                                                      "priceOut":  6
+                                                      "priceIn":  4.5,
+                                                      "priceCacheIn":  0.15,
+                                                      "priceOut":  13.5,
+                                                      "pricePeakIn":  9.0,
+                                                      "pricePeakCacheIn":  0.30,
+                                                      "pricePeakOut":  27.0
                                                   },
                                  "qwen":  {
                                               "_说明":  "阿里云百炼（通义千问）兼容模式，支持看图，可作视觉备选。密钥是百炼控制台 sk- 开头的 API-KEY。",

@@ -278,7 +278,220 @@ public class QQConsoleBridge {
         }
     }
 
+    // DeepSeek 价目是会变的，不能把一次人工查到的数字当成永久真相。
+    // 只允许读取 DeepSeek 官方文档域名；页面结构、模型名、价格行和峰值时段
+    // 任一项解析/校验失败时，保留配置里的回退价，不让异常页面把费用算坏。
+    void startDeepSeekPricingRefreshLoop() {
+        if (!config.ai.officialPricingEnabled)
+            return;
+        Thread t = new Thread(() -> {
+            long intervalMs = Math.max(10L, config.ai.officialPricingRefreshMinutes) * 60_000L;
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    Thread.sleep(intervalMs);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                refreshDeepSeekPricing(false);
+            }
+        }, "deepseek-price-refresh");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    static boolean isOfficialDeepSeekPricingUri(URI uri) {
+        if (uri == null || !"https".equalsIgnoreCase(uri.getScheme())
+                || !"api-docs.deepseek.com".equalsIgnoreCase(uri.getHost()))
+            return false;
+        return uri.getUserInfo() == null && uri.getPort() <= 0;
+    }
+
+    void refreshDeepSeekPricing(boolean startup) {
+        if (!config.ai.officialPricingEnabled)
+            return;
+        String source = config.ai.officialPricingUrl == null
+                ? "" : config.ai.officialPricingUrl.trim();
+        try {
+            URI uri = URI.create(source);
+            if (!isOfficialDeepSeekPricingUri(uri))
+                throw new IOException("官方价目 URL 必须是 https://api-docs.deepseek.com");
+            int timeout = Math.max(3, Math.min(30, config.ai.officialPricingTimeoutSeconds));
+            HttpClient client = HttpClient.newBuilder()
+                    .connectTimeout(java.time.Duration.ofSeconds(timeout))
+                    .followRedirects(HttpClient.Redirect.NORMAL)
+                    .build();
+            java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder(uri)
+                    .timeout(java.time.Duration.ofSeconds(timeout))
+                    .header("Accept", "text/html,application/xhtml+xml")
+                    .header("Accept-Language", "zh-CN,zh;q=0.9")
+                    .header("User-Agent", "QQConsoleBridge/DeepSeekPriceSync")
+                    .GET()
+                    .build();
+            java.net.http.HttpResponse<String> response = client.send(request,
+                    java.net.http.HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            URI finalUri = response.uri();
+            if (response.statusCode() != 200)
+                throw new IOException("官方价目 HTTP " + response.statusCode());
+            if (!isOfficialDeepSeekPricingUri(finalUri))
+                throw new IOException("官方价目发生了非官方 HTTPS 域名跳转");
+
+            DeepSeekPriceSnapshot snapshot = parseDeepSeekPricePage(response.body(), source);
+            int applied = 0;
+            for (AiProvider provider : config.ai.providers.values()) {
+                if (provider.applyDeepSeekPrice(snapshot))
+                    applied++;
+            }
+            if (applied == 0)
+                throw new IOException("当前配置没有可同步的 deepseek-v4-flash/pro 直连预设");
+            config.ai.officialPricingLastSuccessEpochMs = snapshot.fetchedEpochMs;
+            config.ai.officialPricingLastError = "";
+            log("DeepSeek 官方价格同步成功：" + applied + " 个预设，" + snapshot.scheduleLabel()
+                    + "，来源=" + source);
+        } catch (Exception ex) {
+            config.ai.officialPricingLastError = messageOf(ex);
+            log("DeepSeek 官方价格同步失败" + (startup ? "（启动时）" : "（定时）")
+                    + "：" + messageOf(ex) + "；继续使用当前配置/上次成功同步的价格。");
+        }
+    }
+
+    static DeepSeekPriceSnapshot parseDeepSeekPricePage(String html, String source) throws IOException {
+        if (html == null || html.isBlank())
+            throw new IOException("官方价目页面为空");
+        String text = html.replaceAll("(?is)<script\\b[^>]*>.*?</script>", " ")
+                .replaceAll("(?is)<style\\b[^>]*>.*?</style>", " ")
+                .replaceAll("<[^>]+>", " ")
+                .replace("&nbsp;", " ")
+                .replace("&#160;", " ")
+                .replace("&#39;", "'")
+                .replace("&#x27;", "'")
+                .replace("&amp;", "&")
+                .replaceAll("\\s+", " ").trim();
+        String lowerText = text.toLowerCase(java.util.Locale.ROOT);
+        if (!lowerText.contains("deepseek-v4-flash") || !lowerText.contains("deepseek-v4-pro"))
+            throw new IOException("官方价目页面未找到 V4 Flash/Pro 模型名");
+
+        DeepSeekPriceRow cacheHit = parseDeepSeekPriceRow(text,
+                "百万\\s*tokens\\s*输入\\s*[（(]\\s*缓存命中\\s*[）)]");
+        DeepSeekPriceRow cacheMiss = parseDeepSeekPriceRow(text,
+                "百万\\s*tokens\\s*输入\\s*[（(]\\s*缓存未命中\\s*[）)]");
+        DeepSeekPriceRow output = parseDeepSeekPriceRow(text, "百万\\s*tokens\\s*输出");
+        Matcher schedule = Pattern.compile(
+                "高峰时段为北京时间\\s*(\\d{1,2})(?:[:：](\\d{2}))?\\s*[-—至]\\s*"
+                        + "(\\d{1,2})(?:[:：](\\d{2}))?\\s*[、,，]\\s*"
+                        + "(\\d{1,2})(?:[:：](\\d{2}))?\\s*[-—至]\\s*"
+                        + "(\\d{1,2})(?:[:：](\\d{2}))?")
+                .matcher(text);
+        if (!schedule.find())
+            throw new IOException("官方价目页面未解析到北京时间峰值时段");
+        int start1 = parseClockMinute(schedule.group(1), schedule.group(2));
+        int end1 = parseClockMinute(schedule.group(3), schedule.group(4));
+        int start2 = parseClockMinute(schedule.group(5), schedule.group(6));
+        int end2 = parseClockMinute(schedule.group(7), schedule.group(8));
+        if (!validPriceWindow(start1, end1) || !validPriceWindow(start2, end2))
+            throw new IOException("官方价目页面的峰值时段无效");
+        return new DeepSeekPriceSnapshot(cacheHit, cacheMiss, output,
+                start1, end1, start2, end2, source, System.currentTimeMillis());
+    }
+
+    static DeepSeekPriceRow parseDeepSeekPriceRow(String text, String metricRegex) throws IOException {
+        Matcher row = Pattern.compile(metricRegex
+                + "\\s+空闲时段\\s+([0-9]+(?:\\.[0-9]+)?)元\\s+"
+                + "([0-9]+(?:\\.[0-9]+)?)元\\s+高峰时段\\s+"
+                + "([0-9]+(?:\\.[0-9]+)?)元\\s+"
+                + "([0-9]+(?:\\.[0-9]+)?)元").matcher(text);
+        if (!row.find())
+            throw new IOException("官方价目页面缺少价格行：" + metricRegex);
+        double flashOffPeak = parsePositivePrice(row.group(1));
+        double proOffPeak = parsePositivePrice(row.group(2));
+        double flashPeak = parsePositivePrice(row.group(3));
+        double proPeak = parsePositivePrice(row.group(4));
+        return new DeepSeekPriceRow(flashOffPeak, proOffPeak, flashPeak, proPeak);
+    }
+
+    static double parsePositivePrice(String raw) throws IOException {
+        try {
+            double value = Double.parseDouble(raw);
+            if (!Double.isFinite(value) || value <= 0 || value > 1_000_000)
+                throw new NumberFormatException();
+            return value;
+        } catch (NumberFormatException ex) {
+            throw new IOException("官方价目页面包含无效价格：" + raw);
+        }
+    }
+
+    static int parseClockMinute(String hourRaw, String minuteRaw) throws IOException {
+        try {
+            int hour = Integer.parseInt(hourRaw);
+            int minute = minuteRaw == null || minuteRaw.isBlank() ? 0 : Integer.parseInt(minuteRaw);
+            if (hour < 0 || hour > 23 || minute < 0 || minute > 59)
+                throw new NumberFormatException();
+            return hour * 60 + minute;
+        } catch (NumberFormatException ex) {
+            throw new IOException("官方价目页面包含无效时刻");
+        }
+    }
+
+    static boolean validPriceWindow(int start, int end) {
+        return start >= 0 && end <= 24 * 60 && start < end;
+    }
+
+    static final class DeepSeekPriceRow {
+        final double flashOffPeak;
+        final double proOffPeak;
+        final double flashPeak;
+        final double proPeak;
+
+        DeepSeekPriceRow(double flashOffPeak, double proOffPeak,
+                double flashPeak, double proPeak) {
+            this.flashOffPeak = flashOffPeak;
+            this.proOffPeak = proOffPeak;
+            this.flashPeak = flashPeak;
+            this.proPeak = proPeak;
+        }
+    }
+
+    static final class DeepSeekPriceSnapshot {
+        final DeepSeekPriceRow cacheHit;
+        final DeepSeekPriceRow cacheMiss;
+        final DeepSeekPriceRow output;
+        final int peakStart1;
+        final int peakEnd1;
+        final int peakStart2;
+        final int peakEnd2;
+        final String source;
+        final long fetchedEpochMs;
+
+        DeepSeekPriceSnapshot(DeepSeekPriceRow cacheHit, DeepSeekPriceRow cacheMiss,
+                DeepSeekPriceRow output, int peakStart1, int peakEnd1,
+                int peakStart2, int peakEnd2, String source, long fetchedEpochMs) {
+            this.cacheHit = cacheHit;
+            this.cacheMiss = cacheMiss;
+            this.output = output;
+            this.peakStart1 = peakStart1;
+            this.peakEnd1 = peakEnd1;
+            this.peakStart2 = peakStart2;
+            this.peakEnd2 = peakEnd2;
+            this.source = source;
+            this.fetchedEpochMs = fetchedEpochMs;
+        }
+
+        String scheduleLabel() {
+            return "北京时间 " + clockLabel(peakStart1) + "-" + clockLabel(peakEnd1)
+                    + "、" + clockLabel(peakStart2) + "-" + clockLabel(peakEnd2);
+        }
+
+        static String clockLabel(int minute) {
+            return String.format(java.util.Locale.ROOT, "%02d:%02d", minute / 60, minute % 60);
+        }
+    }
+
     void runLocked() throws Exception {
+        // 先同步一次官方价目再接收群消息，避免重启后的第一条 AI 回复继续沿用旧单价。
+        // 同步失败只影响“费用估算”，不影响 QQ 桥连接和 AI 请求本身。
+        refreshDeepSeekPricing(true);
+        startDeepSeekPricingRefreshLoop();
+
         // 获取机器人自己的 QQ 号
         try {
             String info = onebotPost("/get_login_info", "{}");
@@ -2781,6 +2994,16 @@ public class QQConsoleBridge {
                 .append(waiting).append(" 人");
         if (act.priced())
             out.append("\n当前计价单价：").append(act.priceLine(cfg.usdToCny));
+        if (act.isDeepSeek() && cfg.officialPricingEnabled) {
+            if (cfg.officialPricingLastSuccessEpochMs > 0) {
+                out.append("\n官方价目：已自动同步（启动时 + 每 ")
+                        .append(Math.max(10, cfg.officialPricingRefreshMinutes)).append(" 分钟检查）");
+            } else if (cfg.officialPricingLastError != null && !cfg.officialPricingLastError.isBlank()) {
+                out.append("\n官方价目：本次同步失败，当前使用配置回退价");
+            } else {
+                out.append("\n官方价目：已开启自动同步，尚未完成首次检查");
+            }
+        }
         return out.toString();
     }
 
@@ -2824,7 +3047,10 @@ public class QQConsoleBridge {
         if (usage.hasActualCost())
             return "约 ¥" + formatCnyCost(usage.actualCostCny(config.ai.usdToCny)) + "（接口实际）";
         double cny = usage.singleCny(config.ai.usdToCny);
-        return cny < 0 ? "无法计算" : "约 " + formatCnyCost(cny) + " 元";
+        if (cny < 0)
+            return "无法计算";
+        String tier = usage.priceTierSummary();
+        return "约 " + formatCnyCost(cny) + " 元" + (tier.isBlank() ? "" : "（" + tier + "）");
     }
 
     static String formatElapsed(long elapsedNanos) {
@@ -2892,7 +3118,7 @@ public class QQConsoleBridge {
         long started = System.nanoTime();
         log("AI 视觉预处理：模型 " + vision.label() + " 图片 " + images.size() + " 张");
         String resp = aiPostForStage("视觉模型", vision, vision.apiUrl, key, body, remainingMillis);
-        visionUsage.add(resp);
+        visionUsage.add(resp, java.time.Instant.now(), config.ai.usdToCny);
         String message = firstChoiceMessage(resp);
         if (message.isBlank())
             throw new IOException("视觉模型没有返回有效 message");
@@ -3049,7 +3275,7 @@ public class QQConsoleBridge {
                     + "\"tools\":" + (privileged ? AI_TOOLS : AI_TOOLS_MEMBER) + ","
                     + "\"messages\":[" + String.join(",", messages) + "]}";
             String resp = aiPostForStage("默认模型", ai, ai.apiUrl, key, body, remainingMillis);
-            usage.add(resp); // agent 每一步都单独计费，逐次累加
+            usage.add(resp, java.time.Instant.now(), config.ai.usdToCny); // agent 每一步都单独计费，逐次累加
             log("AI 模型轮次：step=" + (step + 1) + " 请求耗时="
                     + ((System.nanoTime() - modelStarted) / 1_000_000L) + "ms");
             String message = firstChoiceMessage(resp);
@@ -3155,7 +3381,7 @@ public class QQConsoleBridge {
             int remainingMillis = remainingAiMillis("默认模型", aiDeadlineNanos);
             long finalStarted = System.nanoTime();
             String resp = aiPostForStage("默认模型", ai, ai.apiUrl, key, body, remainingMillis);
-            usage.add(resp);
+            usage.add(resp, java.time.Instant.now(), config.ai.usdToCny);
             log("AI 最终总结请求耗时=" + ((System.nanoTime() - finalStarted) / 1_000_000L) + "ms");
             String finalMessage = firstChoiceMessage(resp);
             answer = jsonString(finalMessage, "content");
@@ -11607,41 +11833,158 @@ public class QQConsoleBridge {
         double priceIn = -1;         // 输入（未命中缓存的部分）
         double priceCacheIn = -1;    // 输入里命中缓存的部分；<0 则按 priceIn 算
         double priceOut = -1;        // 输出
+        // DeepSeek V4 峰值时段价格；<0 表示该预设仍使用固定单价。
+        volatile double pricePeakIn = -1;
+        volatile double pricePeakCacheIn = -1;
+        volatile double pricePeakOut = -1;
+        volatile int peakStartMinute1 = 9 * 60;
+        volatile int peakEndMinute1 = 12 * 60;
+        volatile int peakStartMinute2 = 14 * 60;
+        volatile int peakEndMinute2 = 18 * 60;
+        volatile String pricingZoneId = "Asia/Shanghai";
+        volatile String pricingSource = "";
+        volatile long pricingUpdatedEpochMs = 0;
         String currency = "CNY";     // 单价币种：CNY 直接用，USD 按 ai.usdToCny 折成人民币
 
         boolean priced() {
             return priceIn >= 0 && priceOut >= 0;
         }
 
+        synchronized boolean hasPeakPricing() {
+            return pricePeakIn >= 0 && pricePeakCacheIn >= 0 && pricePeakOut >= 0;
+        }
+
+        synchronized boolean isPeakAt(java.time.Instant at) {
+            if (!hasPeakPricing())
+                return false;
+            try {
+                java.time.ZoneId zone = java.time.ZoneId.of(
+                        pricingZoneId == null || pricingZoneId.isBlank() ? "Asia/Shanghai" : pricingZoneId);
+                java.time.LocalTime time = java.time.ZonedDateTime.ofInstant(
+                        at == null ? java.time.Instant.now() : at, zone).toLocalTime();
+                int minute = time.getHour() * 60 + time.getMinute();
+                return (minute >= peakStartMinute1 && minute < peakEndMinute1)
+                        || (minute >= peakStartMinute2 && minute < peakEndMinute2);
+            } catch (Exception ex) {
+                // 时区配置异常时回到安全的北京时区，不因显示价目把 AI 请求打断。
+                java.time.LocalTime time = java.time.ZonedDateTime.ofInstant(
+                        at == null ? java.time.Instant.now() : at,
+                        java.time.ZoneId.of("Asia/Shanghai")).toLocalTime();
+                int minute = time.getHour() * 60 + time.getMinute();
+                return (minute >= peakStartMinute1 && minute < peakEndMinute1)
+                        || (minute >= peakStartMinute2 && minute < peakEndMinute2);
+            }
+        }
+
+        synchronized PriceQuote priceQuote(java.time.Instant at) {
+            boolean peak = isPeakAt(at);
+            if (peak && hasPeakPricing())
+                return new PriceQuote(pricePeakIn, pricePeakCacheIn, pricePeakOut, true);
+            return new PriceQuote(priceIn, priceCacheIn, priceOut, false);
+        }
+
+        synchronized double costCny(long promptTokens, long cachedTokens, long completionTokens,
+                java.time.Instant billedAt, double usdToCny) {
+            PriceQuote quote = priceQuote(billedAt);
+            if (!quote.priced())
+                return -1;
+            double cachePrice = quote.priceCacheIn >= 0 ? quote.priceCacheIn : quote.priceIn;
+            double cost = (Math.max(0, promptTokens - cachedTokens) * quote.priceIn
+                    + Math.max(0, cachedTokens) * cachePrice
+                    + Math.max(0, completionTokens) * quote.priceOut) / 1_000_000d;
+            if ("USD".equalsIgnoreCase(currency))
+                cost *= usdToCny > 0 ? usdToCny : 7.2;
+            return cost;
+        }
+
         // 一行价目，给 !ai 状态和日志用
-        String priceLine(double usdToCny) {
+        synchronized String priceLine(double usdToCny) {
             if (isGrokCli())
                 return "SuperGrok 订阅额度（不按 API token 计费）";
             if (!priced())
                 return "未配价";
+            PriceQuote current = priceQuote(java.time.Instant.now());
+            StringBuilder sb = new StringBuilder("当前").append(current.peak ? "高峰" : "空闲")
+                    .append("：").append(formatPriceQuote(current));
+            if (hasPeakPricing()) {
+                PriceQuote offPeak = new PriceQuote(priceIn, priceCacheIn, priceOut, false);
+                PriceQuote peak = new PriceQuote(pricePeakIn, pricePeakCacheIn, pricePeakOut, true);
+                sb.append("；空闲 ").append(formatPriceQuote(offPeak))
+                        .append("；高峰 ").append(formatPriceQuote(peak));
+            }
+            if ("USD".equalsIgnoreCase(currency))
+                sb.append("，按 1$=¥").append(trimNumber(usdToCny)).append(" 折算");
+            if (pricingUpdatedEpochMs > 0)
+                sb.append("；官方同步 ").append(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm")
+                        .withZone(java.time.ZoneId.of("Asia/Shanghai"))
+                        .format(java.time.Instant.ofEpochMilli(pricingUpdatedEpochMs)));
+            return sb.toString();
+        }
+
+        String formatPriceQuote(PriceQuote quote) {
             boolean usd = "USD".equalsIgnoreCase(currency);
             StringBuilder sb = new StringBuilder("输入 ");
             if (usd)
                 sb.append('$');
-            sb.append(trimNumber(priceIn)).append(usd ? "" : " 元");
-            if (priceCacheIn >= 0) {
+            sb.append(trimNumber(quote.priceIn)).append(usd ? "" : " 元");
+            if (quote.priceCacheIn >= 0) {
                 sb.append("（缓存命中 ");
                 if (usd)
                     sb.append('$');
-                sb.append(trimNumber(priceCacheIn)).append(usd ? "" : " 元").append('）');
+                sb.append(trimNumber(quote.priceCacheIn)).append(usd ? "" : " 元").append("）");
             }
             sb.append(" / 输出 ");
             if (usd)
                 sb.append('$');
-            sb.append(trimNumber(priceOut)).append(usd ? "" : " 元").append("，每百万 token");
-            if ("USD".equalsIgnoreCase(currency))
-                sb.append("，按 1$=¥").append(trimNumber(usdToCny)).append(" 折算");
-            return sb.toString();
+            return sb.append(trimNumber(quote.priceOut)).append(usd ? "" : " 元")
+                    .append("，每百万 token").toString();
         }
 
         static String trimNumber(double v) {
             String s = new java.text.DecimalFormat("0.######").format(v);
             return s;
+        }
+
+        synchronized boolean applyDeepSeekPrice(DeepSeekPriceSnapshot snapshot) {
+            if (snapshot == null || !isDeepSeek() || !isOfficialDeepSeekApi())
+                return false;
+            String modelId = model == null ? "" : model.toLowerCase(java.util.Locale.ROOT);
+            boolean flash = modelId.contains("deepseek-v4-flash");
+            boolean pro = modelId.contains("deepseek-v4-pro");
+            if (!flash && !pro)
+                return false;
+            priceIn = flash ? snapshot.cacheMiss.flashOffPeak : snapshot.cacheMiss.proOffPeak;
+            priceCacheIn = flash ? snapshot.cacheHit.flashOffPeak : snapshot.cacheHit.proOffPeak;
+            priceOut = flash ? snapshot.output.flashOffPeak : snapshot.output.proOffPeak;
+            pricePeakIn = flash ? snapshot.cacheMiss.flashPeak : snapshot.cacheMiss.proPeak;
+            pricePeakCacheIn = flash ? snapshot.cacheHit.flashPeak : snapshot.cacheHit.proPeak;
+            pricePeakOut = flash ? snapshot.output.flashPeak : snapshot.output.proPeak;
+            peakStartMinute1 = snapshot.peakStart1;
+            peakEndMinute1 = snapshot.peakEnd1;
+            peakStartMinute2 = snapshot.peakStart2;
+            peakEndMinute2 = snapshot.peakEnd2;
+            pricingZoneId = "Asia/Shanghai";
+            pricingSource = snapshot.source;
+            pricingUpdatedEpochMs = snapshot.fetchedEpochMs;
+            return true;
+        }
+
+        static final class PriceQuote {
+            final double priceIn;
+            final double priceCacheIn;
+            final double priceOut;
+            final boolean peak;
+
+            PriceQuote(double priceIn, double priceCacheIn, double priceOut, boolean peak) {
+                this.priceIn = priceIn;
+                this.priceCacheIn = priceCacheIn;
+                this.priceOut = priceOut;
+                this.peak = peak;
+            }
+
+            boolean priced() {
+                return priceIn >= 0 && priceOut >= 0;
+            }
         }
 
         boolean isCodexCli() {
@@ -11657,6 +12000,17 @@ public class QQConsoleBridge {
             String u = apiUrl == null ? "" : apiUrl.toLowerCase(java.util.Locale.ROOT);
             String m = model == null ? "" : model.toLowerCase(java.util.Locale.ROOT);
             return n.contains("deepseek") || u.contains("api.deepseek.com") || m.startsWith("deepseek-");
+        }
+
+        boolean isOfficialDeepSeekApi() {
+            try {
+                URI uri = URI.create(apiUrl == null ? "" : apiUrl.trim());
+                return "https".equalsIgnoreCase(uri.getScheme())
+                        && "api.deepseek.com".equalsIgnoreCase(uri.getHost())
+                        && uri.getUserInfo() == null && uri.getPort() <= 0;
+            } catch (Exception ex) {
+                return false;
+            }
         }
 
         boolean isLocalCli() {
@@ -11726,10 +12080,21 @@ public class QQConsoleBridge {
         long completionTokens;   // 输出合计
         long actualCostUsdTicks;
         int actualCostResponses;
+        double estimatedCny;
+        int pricedCalls;
+        boolean estimatedCostComplete = true;
+        boolean sawPeakPricing;
+        boolean sawOffPeakPricing;
         int calls;               // 本次提问一共请求了几次模型
         boolean available;       // 至少解析到一次 usage，才敢往群里报数字
 
         void add(String respJson) {
+            add(respJson, java.time.Instant.now(), 7.2);
+        }
+
+        // 费用按每次 API 返回时的本地时刻取峰/谷价，而不是等整轮 agent 结束后
+        // 用最后一个时刻反推；这样跨 12:00/18:00 的长请求也不会整单套错时段。
+        void add(String respJson, java.time.Instant billedAt, double usdToCny) {
             // 即使厂商没返回 usage，也先保留它明确回报的 model；型号展示不依赖计费字段。
             String returnedModel = jsonString(respJson, "model").trim();
             if (!returnedModel.isBlank())
@@ -11759,6 +12124,23 @@ public class QQConsoleBridge {
                 cacheKnown = fromDetails >= 0;
             }
             addTokenCounts(prompt, cached, cacheKnown, completion);
+            if (provider != null && provider.priced()) {
+                double callCost = provider.costCny(prompt, cached, completion, billedAt, usdToCny);
+                if (callCost < 0) {
+                    estimatedCostComplete = false;
+                } else {
+                    estimatedCny += callCost;
+                    pricedCalls++;
+                    if (provider.hasPeakPricing()) {
+                        if (provider.isPeakAt(billedAt))
+                            sawPeakPricing = true;
+                        else
+                            sawOffPeakPricing = true;
+                    }
+                }
+            } else {
+                estimatedCostComplete = false;
+            }
         }
 
         // Codex CLI --json 输出 JSONL；一次 turn.completed 对应一次模型轮次，usage 字段使用
@@ -11882,6 +12264,8 @@ public class QQConsoleBridge {
         double cny(double usdToCny) {
             if (!available || provider == null || !provider.priced())
                 return -1;
+            if (estimatedCostComplete && pricedCalls == calls && calls > 0)
+                return estimatedCny;
             double cacheIn = provider.priceCacheIn >= 0 ? provider.priceCacheIn : provider.priceIn;
             long missTokens = Math.max(0, promptTokens - cachedTokens);
             double cost = (missTokens * provider.priceIn + cachedTokens * cacheIn
@@ -11889,6 +12273,14 @@ public class QQConsoleBridge {
             if ("USD".equalsIgnoreCase(provider.currency))
                 cost *= usdToCny > 0 ? usdToCny : 7.2;
             return cost;
+        }
+
+        String priceTierSummary() {
+            if (!sawPeakPricing && !sawOffPeakPricing)
+                return "";
+            if (sawPeakPricing && sawOffPeakPricing)
+                return "官方峰谷价";
+            return sawPeakPricing ? "官方高峰价" : "官方空闲价";
         }
 
         double singleCny(double usdToCny) {
@@ -11967,6 +12359,12 @@ public class QQConsoleBridge {
         int queueSize = 5;               // 完整 AI 等待队列上限，不含正在回答的那一条
         boolean showUsage = true;        // 回答末尾附上模型型号、费用与耗时
         double usdToCny = 7.2;           // 美元计价的模型（grok/openai 等）折算人民币的汇率
+        boolean officialPricingEnabled = false;
+        String officialPricingUrl = "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/";
+        int officialPricingRefreshMinutes = 360;
+        int officialPricingTimeoutSeconds = 12;
+        volatile long officialPricingLastSuccessEpochMs = 0;
+        volatile String officialPricingLastError = "";
 
         BlueMapConfig bluemap = new BlueMapConfig(); // BlueMap 玩家位置截图
         PlayerViewConfig playerView = new PlayerViewConfig(); // 客户端旁观视角截图
@@ -12255,6 +12653,18 @@ public class QQConsoleBridge {
             String aiJson = jsonObject(json, "ai");
             if (!aiJson.isBlank()) {
                 c.ai.enabled = jsonBoolean(aiJson, "enabled");
+                String officialPricingJson = jsonObject(aiJson, "officialPricing");
+                if (!officialPricingJson.isBlank()) {
+                    if (officialPricingJson.contains("\"enabled\""))
+                        c.ai.officialPricingEnabled = jsonBoolean(officialPricingJson, "enabled");
+                    String officialUrl = jsonString(officialPricingJson, "url");
+                    if (!officialUrl.isBlank())
+                        c.ai.officialPricingUrl = officialUrl.trim();
+                    c.ai.officialPricingRefreshMinutes = jsonInt(officialPricingJson,
+                            "refreshMinutes", c.ai.officialPricingRefreshMinutes);
+                    c.ai.officialPricingTimeoutSeconds = jsonInt(officialPricingJson,
+                            "timeoutSeconds", c.ai.officialPricingTimeoutSeconds);
+                }
                 c.ai.provider = jsonString(aiJson, "provider");
                 c.ai.visionProvider = jsonString(aiJson, "visionProvider");
                 // 多厂商预设表 ai.providers：键名即预设名，值是这家的 apiUrl/model/密钥
@@ -12278,6 +12688,9 @@ public class QQConsoleBridge {
                         preset.priceIn = jsonDouble(pj, "priceIn", -1);
                         preset.priceCacheIn = jsonDouble(pj, "priceCacheIn", -1);
                         preset.priceOut = jsonDouble(pj, "priceOut", -1);
+                        preset.pricePeakIn = jsonDouble(pj, "pricePeakIn", -1);
+                        preset.pricePeakCacheIn = jsonDouble(pj, "pricePeakCacheIn", -1);
+                        preset.pricePeakOut = jsonDouble(pj, "pricePeakOut", -1);
                         preset.currency = jsonString(pj, "currency");
                         if (preset.currency.isBlank())
                             preset.currency = "CNY";
