@@ -22,6 +22,14 @@ QQ 侧可以收到服务端事件或转发的聊天消息：
 
 两张图分别展示桥接链路的 QQ 端和游戏端，不依赖公开仓库携带任何登录资料。
 
+## QQ 图片与表情包的 ChatImage 预览
+
+安装 ChatImage 客户端 Mod 后，QQ 普通图片与表情包会经过图床转存，以 `CICode` 形式进入 Minecraft 聊天；玩家可以直接触发图片预览，普通图片和表情包仍保留不同标签。以下为 NeoForge 1.21.1 / 21.1.235 实服截图：
+
+![QQ 普通图片的 ChatImage 游戏内预览实测](assets/qq-chatimage-image-preview.png)
+
+![QQ 表情包的 ChatImage 游戏内预览实测](assets/qq-chatimage-sticker-preview.png)
+
 ## 反控指令集合
 
 `!help` 汇总了普通查询、信息检索、管理操作和需要确认码的高危操作，可以直观看到权限边界。

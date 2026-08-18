@@ -9,6 +9,11 @@
 - `chatimage` 模式发送 ChatImage `CICode`，安装对应客户端模组的玩家可直接在聊天栏预览远程图片。
 - 图片同源/同内容缓存、失败回退和有界队列，避免媒体处理阻塞 QQ WebSocket。
 
+## 实际效果
+
+- 已补入 NeoForge 1.21.1 / 21.1.235 实服的普通图片与表情包预览截图，见 [真实界面演示](live-ui-demo.md) 和 [PF-GUGUBot 功能核查](PF-GUGUBot功能核查与跟进方案.md)。
+- 截图素材位于 `docs/assets/qq-chatimage-image-preview.png` 与 `docs/assets/qq-chatimage-sticker-preview.png`，用于说明 `CICode` 预览和`[图片]`/`[表情包]`语义区分。
+
 ## 配置要点
 
 ```json
