@@ -4,6 +4,14 @@
 
 它把开服、玩家整合包分发、增量更新、QQ 群运维、备份恢复、性能诊断和日常管理收进一个可迁移目录。项目源自 1.21.1 NeoForge 21.1.235 的长期实战，但脚本会优先读取目标服务端的实际版本和加载器，不把某一台服务器的身份配置写死在公版里。
 
+## 版本与更新日志
+
+- [查看最新稳定版](https://github.com/i0czf/minecraft-server-ops-kit/releases/latest)
+- [查看全部版本与更新日志](https://github.com/i0czf/minecraft-server-ops-kit/releases)
+- [比较版本差异](https://github.com/i0czf/minecraft-server-ops-kit/compare)
+
+发布页只记录经过验证、对使用者有意义的稳定更新批次；零散开发提交仍保留在 Git 提交历史中。
+
 ## 适合谁
 
 - 自己维护 Minecraft Java 服务端的个人服主
