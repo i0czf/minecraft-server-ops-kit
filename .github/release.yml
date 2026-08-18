@@ -1,0 +1,27 @@
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+  categories:
+    - title: "🚨 破坏性变更"
+      labels:
+        - breaking-change
+    - title: "✨ 新增功能"
+      labels:
+        - enhancement
+        - feature
+    - title: "🐛 修复与稳定性"
+      labels:
+        - bug
+        - fix
+    - title: "🔒 安全与兼容"
+      labels:
+        - security
+        - dependencies
+    - title: "📚 文档与体验"
+      labels:
+        - documentation
+        - docs
+    - title: "🔧 其他优化"
+      labels:
+        - "*"
