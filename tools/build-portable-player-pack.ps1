@@ -93,6 +93,7 @@ foreach ($pair in @(
     @{ Source = '_updater\player-update-generic.py'; Target = 'player-update-generic.py' },
     @{ Source = 'UPDATE-URL.txt'; Target = 'UPDATE-URL.txt' },
     @{ Source = 'PORTABLE-UPDATE-URL.txt'; Target = 'PORTABLE-UPDATE-URL.txt' },
+    @{ Source = 'UPDATE-URL-LAN.txt'; Target = 'UPDATE-URL-LAN.txt' },
     @{ Source = 'SERVER.txt'; Target = 'SERVER.txt' },
     @{ Source = 'server-manifest.json'; Target = 'server-manifest.json' },
     @{ Source = 'README-sync.txt'; Target = 'README-sync.txt' },

@@ -42,10 +42,11 @@
     "publishDir":  ".\\modpack-public\\portable",
     "distDir":  ".\\dist",
     "update":  {
-                   "_说明":  "更新服务地址配置；玩家包里的 UPDATE-URL 会根据这里生成。",
+                   "_说明":  "更新服务地址配置；玩家包里的 UPDATE-URL 会根据这里生成。lanHost 可选，供同局域网玩家优先回退。",
                    "scheme":  "http",
                    "host":  "CHANGE-ME-public-host",
                    "port":  18088,
+                   "lanHost":  "",
                    "tokenFile":  ".update-server-token"
                },
     "server":  {

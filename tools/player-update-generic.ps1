@@ -38,7 +38,15 @@ function Join-SafeRelativePath {
 function Get-Sha1 {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return "" }
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA1).Hash.ToLowerInvariant()
+    $hash = [System.Security.Cryptography.SHA1]::Create()
+    $stream = $null
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        return ([System.BitConverter]::ToString($hash.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        if ($stream) { $stream.Dispose() }
+        $hash.Dispose()
+    }
 }
 
 function Write-Utf8NoBom {
@@ -48,19 +56,38 @@ function Write-Utf8NoBom {
     [System.IO.File]::WriteAllText($Path, $Value, $encoding)
 }
 
-function Read-UpdateUrl {
+function Read-UpdateUrls {
     param([string]$Root, [string]$Override)
-    if (-not [string]::IsNullOrWhiteSpace($Override)) { return $Override.Trim() }
-    # TFCR-update-url.txt 是旧周目玩家包留下的文件名，老玩家实例里还有——请勿删除，
-    # 删了这些人的更新地址就找不到了。新包只产出 UPDATE-URL.txt。
-    foreach ($rel in @('UPDATE-URL.txt', 'PORTABLE-UPDATE-URL.txt', 'TFCR-update-url.txt', '_updater\UPDATE-URL.txt', '_updater\PORTABLE-UPDATE-URL.txt')) {
-        $path = Join-Path $Root $rel
-        if (Test-Path -LiteralPath $path -PathType Leaf) {
-            $value = (Get-Content -LiteralPath $path -Raw -Encoding UTF8).Trim()
-            if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+    $rawValues = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($Override)) {
+        [void]$rawValues.Add($Override)
+    } else {
+        # TFCR-update-url.txt 是旧周目玩家包留下的文件名，老玩家实例里还有——请勿删除。
+        $primary = @('UPDATE-URL.txt', 'PORTABLE-UPDATE-URL.txt', 'TFCR-update-url.txt', '_updater\UPDATE-URL.txt', '_updater\PORTABLE-UPDATE-URL.txt')
+        $fallback = @('UPDATE-URL-LAN.txt', 'PORTABLE-UPDATE-URL-LAN.txt', '_updater\UPDATE-URL-LAN.txt', '_updater\PORTABLE-UPDATE-URL-LAN.txt')
+        foreach ($rel in @($primary + $fallback)) {
+            $path = Join-Path $Root $rel
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                try { [void]$rawValues.Add((Get-Content -LiteralPath $path -Raw -Encoding UTF8)) } catch { }
+            }
         }
     }
-    throw '找不到 UPDATE-URL.txt。请确认玩家包没有被拆散，或使用 -ManifestUrl 手动指定 server-manifest.json 地址。'
+    $urls = New-Object System.Collections.Generic.List[string]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($raw in $rawValues) {
+        foreach ($line in ([string]$raw -split "`r?`n")) {
+            $value = ([string]$line).Trim()
+            if ([string]::IsNullOrWhiteSpace($value) -or $value.StartsWith('#')) { continue }
+            if ($seen.Add($value)) { [void]$urls.Add($value) }
+        }
+    }
+    if ($urls.Count -eq 0) { throw '找不到 UPDATE-URL.txt。请确认玩家包没有被拆散，或使用 -ManifestUrl 手动指定 server-manifest.json 地址。' }
+    return @($urls)
+}
+
+function Read-UpdateUrl {
+    param([string]$Root, [string]$Override)
+    return (Read-UpdateUrls -Root $Root -Override $Override | Select-Object -First 1)
 }
 
 function ConvertTo-FileMap {
@@ -926,20 +953,61 @@ Set-Location -LiteralPath $instanceRoot
 # 这里再兜一层，保证直接跑本脚本（不经 bat）也能连 https。
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch { }
 
-$manifestUrl = Read-UpdateUrl -Root $instanceRoot -Override $ManifestUrl
-Write-Host "[同步] 清单：$(Get-MaskedUrl $manifestUrl)"
+$manifestUrls = @(Read-UpdateUrls -Root $instanceRoot -Override $ManifestUrl)
+# 同一局域网访问自家公网地址常常没有 NAT 回环；有 LAN 备用地址时优先探测私网，
+# 外网用户失败后仍会回到原公网地址。
+if ([string]::IsNullOrWhiteSpace($ManifestUrl)) {
+    $privateUrls = @($manifestUrls | Where-Object {
+        try { Test-LocalOrPrivateHost ([Uri]$_).Host } catch { $false }
+    })
+    $publicUrls = @($manifestUrls | Where-Object { $privateUrls -notcontains $_ })
+    $manifestUrls = @($privateUrls + $publicUrls)
+}
+Write-Host ("[同步] 清单候选：" + (($manifestUrls | ForEach-Object { Get-MaskedUrl $_ }) -join '；'))
 $detectedProxy = Get-SystemProxyUrl
 if ($detectedProxy) {
     Write-Host ("[同步] 已检测到系统代理 {0}，官方源走代理；家宽更新服务始终直连。" -f (Get-ProxyDescription $detectedProxy))
 } else {
     Write-Host '[同步] 未检测到系统代理，官方源直连（国内较慢会在 8 秒内回落更新服务）。'
 }
-try {
-    $manifestText = Read-UrlUtf8Text -Url $manifestUrl -TimeoutSec 30
-} catch {
-    throw ("清单获取失败：" + $_.Exception.Message + " 更新源可能正在重启，请稍等一两分钟再试；持续失败请联系管理员。")
+$manifest = $null
+$manifestText = $null
+$selectedManifestUrl = $null
+$lastManifestError = $null
+foreach ($candidate in $manifestUrls) {
+    try {
+        $candidateText = Read-UrlUtf8Text -Url $candidate -TimeoutSec 8 -Retries 1
+        $candidateManifest = $candidateText | ConvertFrom-Json
+        if (-not $candidateManifest.files) { throw 'manifest 缺少 files。' }
+        $manifestText = $candidateText
+        $manifest = $candidateManifest
+        $selectedManifestUrl = $candidate
+        break
+    } catch {
+        $lastManifestError = $_.Exception
+    }
 }
-$manifest = $manifestText | ConvertFrom-Json
+
+# 完整包通常自带清单；更新源短暂不可达时，用它继续做本地哈希对账，
+# 已有文件可以完成同步，缺失文件等更新源恢复后再补下。
+if (-not $manifest) {
+    $localManifestPath = Join-Path $instanceRoot 'server-manifest.json'
+    if (Test-Path -LiteralPath $localManifestPath -PathType Leaf) {
+        try {
+            $localManifest = Get-Content -LiteralPath $localManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($localManifest.files) {
+                $manifest = $localManifest
+                $selectedManifestUrl = $manifestUrls[0]
+                Write-Host '[降级] 更新源暂时不可达，改用包内 server-manifest.json 做本地对账；缺失文件仍需更新源恢复后补下。' -ForegroundColor Yellow
+            }
+        } catch { $manifest = $null }
+    }
+}
+if (-not $manifest) {
+    throw ("清单获取失败：" + $lastManifestError.Message + "；已尝试 " + $manifestUrls.Count + " 个更新地址。若同一局域网，请确认 UPDATE-URL-LAN.txt 中的服机地址；若在外网，请确认 TCP 18088 已转发。")
+}
+$manifestUrl = [string]$selectedManifestUrl
+if ($manifestUrl -ne [string]$manifestUrls[0]) { Write-Host "[同步] 已切换到可用备用地址：$(Get-MaskedUrl $manifestUrl)" }
 if (-not $manifest.files) { throw 'manifest 缺少 files。' }
 
 $slash = $manifestUrl.LastIndexOf('/')

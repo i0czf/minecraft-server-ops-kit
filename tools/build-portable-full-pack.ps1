@@ -164,7 +164,7 @@ Write-InstanceIsolationConfigs -TargetVersionDir $target -Tag '完整包' | Out-
 # 更新器 / 更新地址 / 清单 / 启动器：从发布源取，装完能继续增量同步
 Copy-Children (Join-Path $publish '_updater') (Join-Path $target '_updater')
 Copy-Children (Join-Path $publish '_launchers') (Join-Path $target '_launchers')
-foreach ($file in @('UPDATE-URL.txt', 'PORTABLE-UPDATE-URL.txt', 'SERVER.txt', 'README-sync.txt', 'server-manifest.json', '一键客户端自助修复.bat')) {
+foreach ($file in @('UPDATE-URL.txt', 'PORTABLE-UPDATE-URL.txt', 'UPDATE-URL-LAN.txt', 'SERVER.txt', 'README-sync.txt', 'server-manifest.json', '一键客户端自助修复.bat')) {
     Copy-FileIfExists (Join-Path $publish $file) (Join-Path $target $file)
 }
 foreach ($pair in @(

@@ -4,7 +4,8 @@
 
 ## 已纳入
 
-- 通用运维脚本、控制面板、QQ 桥接源码和玩家同步工具
+- 通用运维脚本、桌面/Web 控制面板、QQ 桥接源码和玩家同步工具
+- Web 面板远程运维说明，以及经过元数据清理的真实手机端界面截图
 - 公版配置模板（`tools/*.example.json`）
 - 公版构建器、验证脚本和通用使用文档
 - 经脱敏的真实运行界面截图及展示文档（`docs/assets/`、`docs/live-ui-demo.md`）
@@ -12,7 +13,7 @@
 
 ## 明确排除
 
-- `tools/portable-pack.json`、`tools/ops-config.json`、更新源 token、RCON 密码
+- `tools/portable-pack.json`、`tools/ops-config.json`、`tools/portable-web-panel.json`、更新源 token、Web 面板令牌、RCON 密码
 - 世界、日志、备份、崩溃报告、玩家缓存、OP/白名单/封禁名单
 - 私服客户端、模组、地图、存档和服务端运行时目录
 - QQ/LLBot 登录数据、二维码、第三方 QQ 客户端、启动器和本机依赖

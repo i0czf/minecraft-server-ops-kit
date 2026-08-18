@@ -265,7 +265,7 @@ if ([bool](Get-Value $config.mrpack 'enabled' $true)) {
     }
     Copy-Children (Join-Path $publish '_updater') (Join-Path $overrides '_updater')
     # 注意：_launchers（PCL/HMCL 启动器本体，50+MB）不进 mrpack——导入 mrpack 的用户手里必然已有启动器
-    foreach ($file in @('UPDATE-URL.txt', 'PORTABLE-UPDATE-URL.txt', 'SERVER.txt', 'README-sync.txt', '一键客户端自助修复.bat')) {
+    foreach ($file in @('UPDATE-URL.txt', 'PORTABLE-UPDATE-URL.txt', 'UPDATE-URL-LAN.txt', 'SERVER.txt', 'README-sync.txt', '一键客户端自助修复.bat')) {
         Copy-FileIfExists (Join-Path $publish $file) (Join-Path $overrides $file)
     }
     foreach ($pair in @(
@@ -335,7 +335,7 @@ if ([bool](Get-Value $config.pcl 'enabled' $true)) {
     foreach ($file in Get-Array $config 'includeFiles' @('options.txt', 'servers.dat')) {
         Copy-FileIfExists (Join-Path $publish ([string]$file)) (Join-Path $target ([string]$file))
     }
-    foreach ($file in @('UPDATE-URL.txt', 'PORTABLE-UPDATE-URL.txt', 'SERVER.txt', 'README-sync.txt', '一键客户端自助修复.bat')) {
+    foreach ($file in @('UPDATE-URL.txt', 'PORTABLE-UPDATE-URL.txt', 'UPDATE-URL-LAN.txt', 'SERVER.txt', 'README-sync.txt', '一键客户端自助修复.bat')) {
         Copy-FileIfExists (Join-Path $publish $file) (Join-Path $target $file)
     }
     foreach ($pair in @(
