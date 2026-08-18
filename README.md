@@ -74,11 +74,13 @@
 
 #### QQ 图片与表情包的游戏内预览
 
-安装与当前 Minecraft/NeoForge 版本匹配的 ChatImage 客户端 Mod 后，QQ群里的普通图片和表情包会先转存到可被玩家访问的图床，再通过 `CICode` 在 Minecraft 聊天中直接预览；消息标签仍区分为`[图片]`和`[表情包]`。下面是 NeoForge 1.21.1 / 21.1.235 实服的真实效果截图：
+安装与当前 Minecraft/NeoForge 版本匹配的 ChatImage 客户端 Mod 后，QQ群里的普通图片和表情包会先转存到可被玩家访问的图床，再通过悬停 `CICode` 在 Minecraft 聊天中预览；点击同一个预览项可打开大图，消息标签仍区分为`[图片]`和`[表情包]`。下面是 NeoForge 1.21.1 / 21.1.235 实服的真实效果截图：
 
 ![QQ 普通图片的 ChatImage 游戏内预览实测](docs/assets/qq-chatimage-image-preview.png)
 
 ![QQ 表情包的 ChatImage 游戏内预览实测](docs/assets/qq-chatimage-sticker-preview.png)
+
+自动转存、手动 `!转图床`、地址分工、ChatImage 悬停预览和故障排查见[QQ 图片转图床说明](docs/qq-image-host-转图床.md)。
 
 QQ 与 Minecraft 的实际双向消息链路如下：
 

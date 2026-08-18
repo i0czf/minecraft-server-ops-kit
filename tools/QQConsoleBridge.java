@@ -2298,6 +2298,36 @@ public class QQConsoleBridge {
         return base.isBlank() || name == null || name.isBlank() ? "" : base + "/i/" + name;
     }
 
+    String imageHostPublicObjectUrl(String imageUrl) {
+        String source = safeRelayUrl(imageUrl);
+        String publicBase = trimTrailingSlash(config.imageHost.publicBaseUrl);
+        if (source.isBlank() || publicBase.isBlank())
+            return "";
+        String publicPrefix = publicBase + "/i/";
+        if (source.startsWith(publicPrefix))
+            return source;
+
+        String name = firstNonBlank(
+                imageHostObjectName(source, config.imageHost.minecraftBaseUrl),
+                imageHostObjectName(source, config.imageHost.lanBaseUrl));
+        if (name.isBlank())
+            return "";
+        return safeRelayUrl(publicPrefix + name);
+    }
+
+    static String imageHostObjectName(String imageUrl, String baseUrl) {
+        String base = trimTrailingSlash(baseUrl);
+        if (imageUrl == null || imageUrl.isBlank() || base.isBlank())
+            return "";
+        String prefix = base + "/i/";
+        if (!imageUrl.startsWith(prefix))
+            return "";
+        String name = imageUrl.substring(prefix.length());
+        if (name.isBlank() || name.contains("/") || name.contains("\\") || name.contains(".."))
+            return "";
+        return name;
+    }
+
     static final String[] MESSAGE_SEGMENT_DATA_KEYS = {
             "text", "id", "qq", "user_id", "url", "file", "path", "file_id",
             "file_size", "name", "summary", "subType", "sub_type", "emoji_id", "emoji_package_id",
@@ -2498,14 +2528,14 @@ public class QQConsoleBridge {
                 case "image" -> {
                     String url = safeRelayUrl(firstNonBlank(segment.value("url"), segment.value("file"),
                             segment.value("path")));
-                    components.add(renderMinecraftImageComponent(
+                    components.addAll(renderMinecraftImageComponents(
                             isAnimatedSegment(segment) ? "[表情包]" : "[图片]", url));
                 }
                 case "mface", "marketface", "bface" -> {
                     String url = safeRelayUrl(firstNonBlank(segment.value("url"), segment.value("file"),
                             segment.value("path")));
                     String label = segmentEmojiLabel(segment);
-                    components.add(renderMinecraftImageComponent(label, url));
+                    components.addAll(renderMinecraftImageComponents(label, url));
                 }
                 case "face" -> {
                     String face = qqFaceLabel(firstNonBlank(segment.value("id"), segment.value("face_id")));
@@ -2530,21 +2560,29 @@ public class QQConsoleBridge {
         return components.isEmpty() ? "" : "[" + String.join(",", components) + "]";
     }
 
-    String renderMinecraftImageComponent(String label, String url) {
+    List<String> renderMinecraftImageComponents(String label, String url) {
         if (url == null || url.isBlank())
-            return minecraftTextComponent(label, "aqua");
+            return List.of(minecraftTextComponent(label, "aqua"));
         String mode = normalizeMinecraftImageMode(config.imageHost.minecraftImageMode);
         if (mode.equals("chatimage") && !url.contains(",") && !url.contains("[") && !url.contains("]")) {
             String name = truncate((label == null ? "图片" : label)
                     .replace('[', ' ').replace(']', ' ').replace(',', ' ').trim(), 24);
             String cicode = "[[CICode,url=" + url + ",name=" + (name.isBlank() ? "图片" : name) + "]]";
-            return minecraftActionComponent(cicode, "gold", "点击打开图片\\n" + url,
-                    "open_url", url);
+            String publicUrl = imageHostPublicObjectUrl(url);
+            String clickUrl = publicUrl.isBlank() ? url : publicUrl;
+            if (!clickUrl.isBlank()) {
+                boolean isPublic = !publicUrl.isBlank();
+                // ChatImage 1.4.7 会把 show_text 悬停内容里的 CICode 转成图片预览，
+                // 并保留同一个可见文本组件的 clickEvent，因此预览项本身即可打开大图。
+                return List.of(minecraftActionComponent(label, isPublic ? "gold" : "aqua",
+                        "鼠标悬停预览\\n" + cicode, "open_url", clickUrl));
+            }
+            return List.of(minecraftTextComponent(cicode, "gold"));
         }
         if (mode.equals("imagepreviewer"))
-            return minecraftActionComponent(label, "aqua", "点击预览图片\\n" + url,
-                    "run_command", "/imagepreview preview " + url + " 60");
-        return minecraftLinkComponent(label, url);
+            return List.of(minecraftActionComponent(label, "aqua", "点击预览图片\\n" + url,
+                    "run_command", "/imagepreview preview " + url + " 60"));
+        return List.of(minecraftLinkComponent(label, url));
     }
 
     static String normalizeMinecraftImageMode(String mode) {
@@ -12982,7 +13020,8 @@ public class QQConsoleBridge {
         String bindHost = "127.0.0.1";        // 本机图床监听地址；远端客户端访问时按需改为局域网地址/0.0.0.0
         // Minecraft 客户端能访问的图片地址；留空时按 publicBaseUrl，再退回 lanBaseUrl。
         String minecraftBaseUrl = "";
-        // link=原版点击打开；chatimage=ChatImage CICode；imagepreviewer=ImagePreviewer 点击预览。
+        // link=原版点击打开；chatimage=ChatImage CICode 悬停预览并支持同项点击打开公链大图；
+        // imagepreviewer=ImagePreviewer 点击预览。
         String minecraftImageMode = "link";
         String token = "";
         String tokensFile = "";

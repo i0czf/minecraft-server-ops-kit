@@ -612,7 +612,8 @@ $files = @(
     'docs\qq-bot-minecraft-ai-architecture.md',
     'docs\qq-item-aspect-index-要素物品反查.md',
     'docs\玩家拉新公版.md',
-    'docs\PF-GUGUBot功能核查与跟进方案.md'
+    'docs\PF-GUGUBot功能核查与跟进方案.md',
+    'docs\qq-image-host-转图床.md'
 )
 
 # Discord 频道相关组件（反控桥/webhook 发送器/编译脚本）只随私用包分发：
