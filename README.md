@@ -80,6 +80,8 @@
 
 ![QQ 表情包的 ChatImage 游戏内预览实测](docs/assets/qq-chatimage-sticker-preview.png)
 
+自动转存、手动 `!转图床`、地址分工、ChatImage 悬停预览和故障排查见[QQ 图片转图床说明](docs/qq-image-host-转图床.md)。
+
 QQ 与 Minecraft 的实际双向消息链路如下：
 
 ![QQ 群消息桥接](docs/assets/qq-server-sync.png)
