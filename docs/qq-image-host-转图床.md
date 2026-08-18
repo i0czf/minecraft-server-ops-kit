@@ -6,7 +6,7 @@
 
 - 自动转发：打开 `imageHost.enabled` 和 `imageHost.autoRelay` 后，QQ 普通图片、GIF 和表情图片会自动下载、校验并上传到图床。
 - 手动转存：引用图片或表情包后发送 `!转图床` 或 `!上传图床`；也可以把图片和命令放在同一条消息里。
-- Minecraft 预览：`minecraftImageMode=chatimage` 时，桥会发送 ChatImage `CICode`；安装匹配客户端 Mod 的玩家可以悬停预览。
+- Minecraft 预览：`minecraftImageMode=chatimage` 时，桥会把 ChatImage `CICode` 放进可见图片文本的悬停内容；安装匹配客户端 Mod 的玩家可以悬停预览，并点击同一个预览项打开大图。
 - 降级路径：没有 ChatImage 时仍显示可点击链接；图床上传失败时回退为 QQ 原图链接，不阻塞文字消息。
 
 ## 自动转发流程
@@ -14,7 +14,7 @@
 1. QQ 群里发送普通图片、GIF 或表情图片，不需要额外命令。
 2. QQ 桥下载原图，并通过本机回环地址上传到图床，例如 `http://127.0.0.1:38080/upload`。
 3. 图床按内容哈希保存图片；同一来源或同一内容在缓存有效期内不会重复上传。
-4. 自动转发生成的 Minecraft 图片地址按 `minecraftBaseUrl`、`publicBaseUrl`、`lanBaseUrl` 的顺序选择。远端玩家场景必须让 `minecraftBaseUrl`（或回退使用的 `publicBaseUrl`）对每个玩家可访问，不能使用服务器本机的 `127.0.0.1` 或仅局域网地址。
+4. 自动转发生成的 Minecraft 图片地址按 `minecraftBaseUrl`、`publicBaseUrl`、`lanBaseUrl` 的顺序选择；这个地址只需要对实际玩家可访问，可以是公网地址，也可以是所有目标玩家都能访问的局域网地址，不能使用玩家不可达的服务器本机 `127.0.0.1`。
 5. 普通图片显示为`[图片]`，动画/商城表情及表情子类型图片显示为`[表情包]`。下载失败、格式不支持或超过大小限制时，会保留原图链接并继续转发整条消息。
 
 ## 群里手动转图床
@@ -59,7 +59,8 @@ http://image-host.example.com:38080/i/<文件名>.gif
 
 - `uploadUrl` 只给服务器本机使用，默认监听回环地址即可。
 - `publicBaseUrl` 用于手动转存返回的公开直链。
-- `minecraftBaseUrl` 用于自动转发到 Minecraft 的图片地址；远端玩家必须能访问它。若留空，桥会回退到 `publicBaseUrl`，不要把 `lanBaseUrl` 误当成公网地址。
+- `minecraftBaseUrl` 用于自动转发到 Minecraft 的图片地址；它可以按玩家范围使用公网或局域网地址。若留空，桥会回退到 `publicBaseUrl`，再按代码路径回退到 `lanBaseUrl`。
+- `publicBaseUrl` 配置后，`chatimage` 模式会识别 `minecraftBaseUrl` 或 `lanBaseUrl` 下的图床对象地址，并把同一聊天项的点击目标映射到 `publicBaseUrl` 下的同名大图；因此可以让游戏内预览走玩家可达地址、浏览器点击走公链地址。映射只接受单层文件名，不会拼接路径穿越内容。
 - 需要远端玩家访问时才考虑 `bindHost=0.0.0.0`，并在防火墙/路由器只放行图床所需端口。
 - `tools/image-host-tokens.json` 和 `tools/ops-config.json` 属于私有配置，不能提交到公版仓库或发送到群里。
 
@@ -94,7 +95,7 @@ http://image-host.example.com:38080/i/<文件名>.gif
 | `minecraftImageMode` | 依赖 | 效果 |
 | --- | --- | --- |
 | `link` | 不需要额外 Mod/插件 | 显示链接，悬停查看地址，点击浏览器打开 |
-| `chatimage` | 每个要预览的玩家安装匹配版本的 [ChatImage](https://modrinth.com/mod/chatimage) 客户端 Mod | Minecraft 聊天内悬停预览图片 |
+| `chatimage` | 每个要预览的玩家安装匹配版本的 [ChatImage](https://modrinth.com/mod/chatimage) 客户端 Mod | Minecraft 聊天内悬停预览图片；点击同一个预览项打开大图 |
 | `imagepreviewer` | Paper/Spigot 服务端安装 [ImagePreviewer](https://www.spigotmc.org/resources/image-previewer%E2%80%8B-preview-images-in-chat-bar-with-ease-1-20-1-21-3.120888/) 和 PacketEvents | 执行插件预览命令；不适用于纯 NeoForge 服务端 |
 
 本项目的 NeoForge 1.21.1 / 21.1.235 实测采用 ChatImage 路径；客户端 Mod 构建必须以实际 Minecraft/NeoForge 版本为准，不能直接套用其他版本的 JAR。
@@ -104,7 +105,7 @@ http://image-host.example.com:38080/i/<文件名>.gif
 - 没有自动转存：确认 `imageHost.enabled=true`、`autoRelay=true`，令牌文件存在且标签匹配。
 - 手动命令提示无权限：检查 `memberAccess`；管理员仍需通过项目的管理员识别逻辑。
 - 图床无响应：访问本机 `http://127.0.0.1:38080/status`，检查图床进程、端口和日志。
-- 玩家打不开图片：检查 `minecraftBaseUrl` 是否为玩家可达地址、防火墙是否放行，以及图床是否只监听了 `127.0.0.1`。
+- 玩家打不开图片：检查 `minecraftBaseUrl` 是否为玩家可达地址、防火墙是否放行，以及图床是否只监听了 `127.0.0.1`；点击后的浏览器地址异常时，再检查 `publicBaseUrl` 是否正确。
 - 图片转发失败：QQ 原图可能已过期、下载需要鉴权、超过默认 20MB，或格式不是 PNG/JPG/GIF/WEBP/BMP。
 - 只有文字没有预览：检查客户端是否安装并加载了与当前版本匹配的 ChatImage。
 

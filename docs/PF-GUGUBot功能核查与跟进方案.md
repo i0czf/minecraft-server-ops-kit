@@ -14,14 +14,14 @@
 - 图片/动画表情在 `imageHost.enabled=true`、`autoRelay=true` 且令牌有效时，会进入独立单线程队列：下载、校验、按内容哈希上传本机图床，并缓存同源/同内容结果；失败时回退为原图链接，不吞掉整条消息。
 - 普通图片与表情包会保留语义标签：`image` 普通图片显示 `[图片]`，动画/商城表情及带表情子类型的图片显示 `[表情包]`；两者都走同一条图床转存链路。
 - 已新增标准库实现的 [image-host-server.py](../tools/image-host-server.py) 与启动/停止脚本，上传接口为 `/upload`，预览地址为 `/i/<sha256>.<ext>`，默认只监听 `127.0.0.1`。
-- Minecraft 图片显示模式可配置为 `link`、`chatimage` 或 `imagepreviewer`。其中 `link` 不需要额外客户端能力；`chatimage` 会发送 `CICode`，由安装 ChatImage 的客户端直接预览远程图片；`imagepreviewer` 只适合 Paper/Spigot 插件链路。
+- Minecraft 图片显示模式可配置为 `link`、`chatimage` 或 `imagepreviewer`。其中 `link` 不需要额外客户端能力；`chatimage` 会把 `CICode` 放进可见消息的悬停内容，由安装 ChatImage 的客户端预览远程图片，并支持点击同一个预览项打开大图；`imagepreviewer` 只适合 Paper/Spigot 插件链路。
 - Minecraft → QQ 现有文本、图片、视频和合并转发发送路径未改动；统一结构化发送出口仍属于后续阶段。
 
 ## 本次实战更新（2026-08-18）
 
-已在真实 NeoForge 1.21.1 / 21.1.235 服务端验证：QQ 普通图片、GIF 和表情包均可自动下载并上传到兼容的 MC 图床，再以 Minecraft 客户端可访问的地址转发。生产配置应保持“上传走服务器本机回环地址、游戏聊天使用公链地址”的分工；公版模板只保留示例域名，不写入实际服务器域名、IP 或令牌。
+已在真实 NeoForge 1.21.1 / 21.1.235 服务端验证：QQ 普通图片、GIF 和表情包均可自动下载并上传到兼容的 MC 图床，再以 Minecraft 客户端可访问的地址转发。生产配置应保持“上传走服务器本机回环地址、游戏聊天使用玩家可达地址”的分工；跨网络访问时使用公链地址，公版模板只保留示例域名，不写入实际服务器域名、IP 或令牌。
 
-本次还补上了 QQ 图片事件中常见的 `summary`、`subType`/`sub_type` 与 GIF/WebP/APNG 后缀判断，避免把表情包错误标成普通图片。已验证图床上传、公开地址读取、删除清理、自动转存、图片/表情包标签渲染，以及 `chatimage` 模式下远程公链 URL 生成 `CICode`；消息转发仍使用有界单线程队列，以保证多段消息的顺序，重复图片则命中缓存。
+本次还补上了 QQ 图片事件中常见的 `summary`、`subType`/`sub_type` 与 GIF/WebP/APNG 后缀判断，避免把表情包错误标成普通图片。已验证图床上传、公开地址读取、删除清理、自动转存、图片/表情包标签渲染，以及 `chatimage` 模式下远程公链 URL 生成 `CICode`；代码现把 `CICode` 放在同一可见消息组件的悬停内容中，并将局域网/游戏内图床对象按文件名映射到 `publicBaseUrl` 作为点击大图地址。消息转发仍使用有界单线程队列，以保证多段消息的顺序，重复图片则命中缓存。
 
 ### 实际游戏内预览截图
 
@@ -283,10 +283,10 @@ sendGroupMessage(groupId, List<MessageSegment>)
    | `minecraftImageMode` | 需要安装什么 | 实际效果 |
    | --- | --- | --- |
    | `link` | 不需要 Mod/插件 | 聊天里显示 `[图片]`，悬浮查看 URL，点击浏览器打开 |
-   | `chatimage` | 每个要预览的玩家安装 NeoForge 对应版本的 [ChatImage](https://modrinth.com/mod/chatimage) | 使用 `[[CICode,...]]`，在 Minecraft 聊天内直接显示图片 |
+   | `chatimage` | 每个要预览的玩家安装 NeoForge 对应版本的 [ChatImage](https://modrinth.com/mod/chatimage) | 使用 `[[CICode,...]]` 写入悬停内容，在 Minecraft 聊天内预览图片；点击同一项打开大图 |
    | `imagepreviewer` | Paper/Spigot 服务端安装 [ImagePreviewer](https://www.spigotmc.org/resources/image-previewer%E2%80%8B-preview-images-in-chat-bar-with-ease-1-20-1-21-3.120888/) 和 PacketEvents | 点击聊天项执行预览命令；不适用于纯 NeoForge 服务端 |
 
-   对本项目的 NeoForge 1.21.1 服，推荐 `chatimage`；这里说的“客户端模组”就是 ChatImage，需按客户端实际 Minecraft/NeoForge 版本下载对应构建。远程 HTTP(S) 图片只要求查看者安装客户端模组；本地文件预览才需要服务端配套能力。`ImagePreviewer` 是服务端插件，不是客户端模组。
+   对本项目的 NeoForge 1.21.1 服，推荐 `chatimage`；这里说的“客户端模组”就是 ChatImage，需按客户端实际 Minecraft/NeoForge 版本下载对应构建。远程 HTTP(S) 图片只要求查看者安装客户端模组；本地文件预览才需要服务端配套能力。若游戏内地址使用局域网图床而浏览器需要走公链，配置 `publicBaseUrl` 后同一聊天项会按安全的单层文件名映射到公链对象。`ImagePreviewer` 是服务端插件，不是客户端模组。
 
 ## 4. 推荐的实现分层
 

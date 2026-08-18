@@ -245,7 +245,7 @@
                         "peakPlayerSafeRadius":  12
                     },
     "imageHost":  {
-                      "_说明":  "本机图床。enabled=true 且 autoRelay=true 后，QQ 普通聊天里的图片/表情包会自动转存；minecraftBaseUrl 必须是所有 Minecraft 客户端能访问的公链地址，不能填机器人所在机器的 127.0.0.1 或仅局域网地址。minecraftImageMode 可填 link、chatimage 或 imagepreviewer。bindHost 默认只监听本机；公链访问时改为 0.0.0.0，并在防火墙/路由器只放行对应端口。手动 !转图床 仍可用。请复制 tools/image-host-tokens.example.json 为 tools/image-host-tokens.json 并修改令牌，不要把密钥写进本模板。",
+                      "_说明":  "本机图床。enabled=true 且 autoRelay=true 后，QQ 普通聊天里的图片/表情包会自动转存；minecraftBaseUrl 必须是实际 Minecraft 客户端能访问的地址，可按部署范围使用公网或局域网地址，不能填玩家不可达的 127.0.0.1。chatimage 会把 CICode 放入可见消息的悬停内容，并在配置 publicBaseUrl 时把 minecraftBaseUrl/lanBaseUrl 下的图床对象映射为公链同名对象供同项点击；minecraftImageMode 可填 link、chatimage 或 imagepreviewer。bindHost 默认只监听本机；需要远端访问时改为 0.0.0.0，并在防火墙/路由器只放行对应端口。手动 !转图床 仍可用。请复制 tools/image-host-tokens.example.json 为 tools/image-host-tokens.json 并修改令牌，不要把密钥写进本模板。",
                       "enabled":  false,
                       "memberAccess":  true,
                       "autoRelay":  true,
