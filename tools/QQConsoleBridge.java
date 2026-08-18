@@ -70,6 +70,9 @@ public class QQConsoleBridge {
     private final Object sharedRconLock = new Object();
     private final java.util.concurrent.atomic.AtomicBoolean aiBusy = new java.util.concurrent.atomic.AtomicBoolean(false);
     private java.util.concurrent.ExecutorService aiExec;
+    // 工具调用与模型请求分线程，单个脚本/截图工具卡住时可以被超时取消，
+    // 不把整个 AI 队列永久堵死。
+    private java.util.concurrent.ExecutorService aiToolExec;
     // 完整 AI 仍单线程执行；忙的时候进短队列，而不是直接丢掉后来的提问。
     private final Object aiQueueLock = new Object();
     private final java.util.ArrayDeque<QueuedAiJob> aiQueue = new java.util.ArrayDeque<>();
@@ -2238,6 +2241,17 @@ public class QQConsoleBridge {
         return aiExec;
     }
 
+    synchronized java.util.concurrent.ExecutorService aiToolExecutor() {
+        if (aiToolExec == null) {
+            aiToolExec = java.util.concurrent.Executors.newCachedThreadPool(r -> {
+                Thread t = new Thread(r, "ai-tool");
+                t.setDaemon(true);
+                return t;
+            });
+        }
+        return aiToolExec;
+    }
+
     static class QueuedAiJob {
         final long senderId;
         final String who;
@@ -2265,6 +2279,40 @@ public class QQConsoleBridge {
         if (question == null)
             return "";
         return question.replaceAll("\\s+", " ").trim().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    static boolean containsAny(String text, String... terms) {
+        if (text == null || text.isBlank())
+            return false;
+        for (String term : terms) {
+            if (term != null && !term.isBlank() && text.contains(term))
+                return true;
+        }
+        return false;
+    }
+
+    // 有些兼容接口会把“让我读取文件/然后修改”当普通文本返回，而不是返回 tool_calls。
+    // 这种内容不是最终答案：若直接发送，用户就会看到“说到一半”。
+    // 只对管理员、短小且明显带执行计划的文本触发一次续问，避免把正常闲聊误判成工具调用。
+    static boolean looksLikeToolPlan(String answer, String question, boolean privileged) {
+        if (!privileged || answer == null || question == null)
+            return false;
+        String text = answer.replaceAll("\\s+", " ").trim().toLowerCase(java.util.Locale.ROOT);
+        if (text.isBlank() || text.length() > 1000)
+            return false;
+        boolean toolVerb = containsAny(text,
+                "读取文件", "读取配置", "读取日志", "查看配置", "查看日志", "检查配置", "检查文件",
+                "搜索文件", "列出目录", "执行命令", "调用工具", "read_file", "read_server_log",
+                "search_files", "list_dir", "run_rcon", "replace_in_config", "set_server_property",
+                "修改配置", "改成", "写入配置", "替换");
+        boolean planCue = containsAny(text,
+                "让我", "我先", "我去", "接下来", "然后", "正在", "准备", "需要");
+        boolean actionQuestion = containsAny(normalizeAiQuestion(question),
+                "改", "修改", "设置", "开启", "关闭", "打开", "关掉", "改成", "换成", "替换", "写入");
+        boolean alreadyDone = containsAny(text,
+                "已修改", "已经修改", "修改完成", "成功修改", "改好了", "已完成", "当前值：", "结论是");
+        boolean stillPlanning = containsAny(text, "让我", "我先", "接下来", "然后", "正在");
+        return toolVerb && (planCue || actionQuestion) && (!alreadyDone || stillPlanning);
     }
 
     int aiQueueLimit() {
@@ -2980,13 +3028,19 @@ public class QQConsoleBridge {
 
         String answer = null;
         int maxSteps = Math.max(1, config.ai.maxSteps);
+        int maxRecoveryAttempts = Math.max(0, Math.min(2, config.ai.maxRecoveryAttempts));
+        // 正常路径最多 maxSteps 轮；只有检测到“执行计划但没有 tool_calls”时，
+        // 才允许额外的恢复轮次，把模型拉回工具调用状态机。
+        int maxModelRounds = maxSteps + maxRecoveryAttempts;
         int maxToolCalls = Math.max(1, config.ai.maxToolCalls);
         int maxWebFetches = Math.max(0, config.ai.maxWebFetches);
         int toolCallsUsed = 0;
         int webFetchesUsed = 0;
         boolean toolBudgetExhausted = false;
+        int recoveryAttempts = 0;
+        boolean recoveryNoticeSent = false;
         // timeoutSeconds 是整次 QQ AI 请求的总预算，不是视觉预处理或每一轮模型调用各自重置。
-        for (int step = 0; step < maxSteps && answer == null; step++) {
+        for (int step = 0; step < maxModelRounds && answer == null; step++) {
             int remainingMillis = remainingAiMillis("默认模型", aiDeadlineNanos);
             long modelStarted = System.nanoTime();
             String body = "{\"model\":\"" + jsonEscape(ai.model) + "\"," 
@@ -3023,7 +3077,29 @@ public class QQConsoleBridge {
             if (calls.isEmpty()) {
                 if (looksLikeDsmlToolCall(messageContent))
                     answer = "模型返回了未解析的工具调用格式，本次没有执行任何服务器命令。请稍后重试或切换支持标准 function calling 的模型。";
-                else
+                else if (looksLikeToolPlan(messageContent, question, privileged)) {
+                    if (recoveryAttempts < maxRecoveryAttempts) {
+                        recoveryAttempts++;
+                        if (!recoveryNoticeSent) {
+                            sendAiReply(group, actorId, "[AI] 刚才只生成了处理计划，我继续执行中，请稍候…");
+                            recoveryNoticeSent = true;
+                        }
+                        // 保留模型刚才的计划，再用 user 角色明确要求它真正发起工具调用。
+                        // 这样兼容接口即使首轮误返回普通文本，也能回到标准 agent 状态机。
+                        messages.add("{\"role\":\"assistant\",\"content\":\""
+                                + jsonEscape(messageContent) + "\"}");
+                        messages.add("{\"role\":\"user\",\"content\":\""
+                                + jsonEscape("你刚才只输出了处理计划，没有真正发出工具调用。请继续完成原始用户请求，"
+                                        + "不要再次描述‘让我读取/我先确认’之类的计划；现在直接调用合适的工具并等待工具结果。"
+                                        + "如果这是管理员的配置修改请求，先读取原文，再精确执行修改；完成后再给最终结论。")
+                                + "\"}");
+                        log("AI 输出了未执行计划，已发起续问：第 " + recoveryAttempts + " 次，内容="
+                                + truncate(messageContent.replaceAll("\\s+", " "), 180));
+                        continue;
+                    }
+                    answer = "我刚才只生成了处理计划，但工具调用没有成功发出；本次没有确认修改任何服务器文件。请稍后重试。";
+                    log("AI 续问后仍未返回工具调用，已转为明确失败，不发送计划文本");
+                } else
                     answer = messageContent;
                 break;
             }
@@ -3051,7 +3127,10 @@ public class QQConsoleBridge {
                     toolCallsUsed++;
                     if ("web_fetch".equals(name))
                         webFetchesUsed++;
-                    result = executeAiTool(name, args, privileged, group);
+                    int toolTimeoutMillis = Math.min(
+                            Math.max(5, Math.min(180, config.ai.toolTimeoutSeconds)) * 1000,
+                            remainingAiMillis("工具 " + name, aiDeadlineNanos));
+                    result = executeAiToolWithTimeout(name, args, privileged, group, toolTimeoutMillis);
                 }
                 long toolElapsed = (System.nanoTime() - toolStarted) / 1_000_000L;
                 log("AI 工具调用：" + (privileged ? "" : "[群友] ") + name
@@ -4974,6 +5053,32 @@ public class QQConsoleBridge {
             }
         } catch (Exception ex) {
             return "工具执行失败：" + messageOf(ex);
+        }
+    }
+
+    // 工具本身可能调用 PowerShell、RCON 或浏览器。即使工具内部漏了超时，
+    // 这里也要给 agent 一个可消费的结果，让它能继续总结或明确报告失败。
+    String executeAiToolWithTimeout(String name, String argsJson, boolean privileged, String group,
+            int timeoutMillis) {
+        // remainingAiMillis() 保证至少留出 250ms；这里不能再抬高下限，
+        // 否则请求已接近总预算时，工具线程仍可能越过整次请求的截止时间。
+        int bounded = Math.max(250, timeoutMillis);
+        java.util.concurrent.Future<String> future = aiToolExecutor().submit(
+                () -> executeAiTool(name, argsJson, privileged, group));
+        try {
+            return future.get(bounded, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException ex) {
+            future.cancel(true);
+            log("AI 工具超时：" + name + "，限时=" + bounded + "ms，已请求中断");
+            return "工具执行超时（" + (bounded / 1000.0) + " 秒），结果未知；"
+                    + "不要重复执行可能产生改动的操作，请在最终回答中如实说明状态待核实。";
+        } catch (InterruptedException ex) {
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            return "工具执行被中断，结果未知；请不要重复执行可能产生改动的操作。";
+        } catch (java.util.concurrent.ExecutionException ex) {
+            Throwable cause = ex.getCause() == null ? ex : ex.getCause();
+            return "工具执行失败：" + messageOf(cause);
         }
     }
 
@@ -11087,9 +11192,15 @@ public class QQConsoleBridge {
         return text.length() <= max ? text : text.substring(0, Math.max(0, max - 3)) + "...";
     }
 
-    static String messageOf(Exception ex) {
+    static String messageOf(Throwable ex) {
+        if (ex == null)
+            return "未知异常";
         String msg = ex.getMessage();
         return msg == null || msg.isBlank() ? ex.getClass().getSimpleName() : translateToolError(msg);
+    }
+
+    static String messageOf(Exception ex) {
+        return messageOf((Throwable) ex);
     }
 
     // rcon-command.ps1 等工具脚本的英文报错转中文。脚本侧保持纯 ASCII 报错
@@ -11841,7 +11952,9 @@ public class QQConsoleBridge {
         int timeoutSeconds = 120;
         int logTailLines = 150;
         int maxSteps = 4;                 // 每次提问最多几轮模型+工具；超限后再做一次无工具总结
+        int maxRecoveryAttempts = 1;     // 模型只说“让我读取/修改”但没发 tool_calls 时，自动续问次数
         int maxToolCalls = 8;             // 单次提问最多实际执行多少个工具
+        int toolTimeoutSeconds = 60;      // 单个工具调用的上限；避免脚本/浏览器卡死整个 AI 队列
         int maxWebFetches = 1;             // 单次提问最多联网查几个来源；限额只拦模型，不要把原文发给群友
         boolean codexActionsEnabled = false; // Codex CLI 是否可通过受控网关执行常用 RCON
         // AI 智能体禁止自动执行的命令首词（防误触），默认拦停服/重启
@@ -12184,7 +12297,9 @@ public class QQConsoleBridge {
                 c.ai.timeoutSeconds = jsonInt(aiJson, "timeoutSeconds", 120);
                 c.ai.logTailLines = jsonInt(aiJson, "logTailLines", 150);
                 c.ai.maxSteps = jsonInt(aiJson, "maxSteps", 4);
+                c.ai.maxRecoveryAttempts = jsonInt(aiJson, "maxRecoveryAttempts", 1);
                 c.ai.maxToolCalls = jsonInt(aiJson, "maxToolCalls", 8);
+                c.ai.toolTimeoutSeconds = jsonInt(aiJson, "toolTimeoutSeconds", 60);
                 c.ai.maxWebFetches = jsonInt(aiJson, "maxWebFetches", 1);
                 if (aiJson.contains("\"codexActionsEnabled\""))
                     c.ai.codexActionsEnabled = jsonBoolean(aiJson, "codexActionsEnabled");
