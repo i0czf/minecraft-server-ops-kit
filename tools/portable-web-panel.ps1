@@ -837,6 +837,29 @@ button,input,select{font:inherit}button{border:0;border-radius:8px;padding:9px 1
 input,select{background:var(--input);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px}.login{max-width:480px;margin:12vh auto}.login h1{margin-top:0}.login-row{display:flex;gap:8px}.login-row input{flex:1}.notice{border-left:3px solid var(--warn);background:#2a2518;padding:10px;color:#f3d98c;margin-bottom:14px}.hidden{display:none!important}.msg{min-height:24px;color:var(--muted);margin:8px 0}.msg.error{color:#ff9ca6}.msg.ok{color:#7de0af}
 pre{white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto;background:#0b0f14;border:1px solid var(--line);border-radius:8px;padding:12px;margin:10px 0 0;font:12px/1.55 Consolas,monospace}.rcon-row{display:flex;gap:8px}.rcon-row input{flex:1;font-family:Consolas,monospace}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;border-bottom:1px solid var(--line);padding:8px 6px;white-space:nowrap}th{color:var(--muted)}
 .perf-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}.perf-head h2{margin:0}.perf-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.gauge-card{text-align:center;min-width:0}.gauge{--pct:0%;--gauge-color:var(--accent);width:112px;height:112px;border-radius:50%;margin:0 auto 8px;background:conic-gradient(from -90deg,var(--gauge-color) var(--pct),#3a2c38 0);display:grid;place-items:center;position:relative}.gauge::after{content:"";position:absolute;inset:10px;border-radius:50%;background:var(--card)}.gauge-inner{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;line-height:1.15}.gauge-value{font-size:23px;font-weight:700}.gauge-sub{font-size:12px;color:var(--muted);margin-top:4px;max-width:92px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.gauge-label{font-size:14px;color:var(--muted)}.perf-chart{margin-top:14px;padding:10px 12px 8px;border:1px solid var(--line);border-radius:10px;background:#151b23}.perf-chart canvas{display:block;width:100%;height:130px}.perf-legend{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;flex-wrap:wrap}.legend-dot{width:9px;height:9px;border-radius:50%;display:inline-block}.legend-cpu{background:var(--accent)}.legend-mem{background:var(--warn)}.perf-details{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:12px}.perf-detail{border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:#171d25}.perf-detail span{display:block;color:var(--muted);font-size:12px}.perf-detail b{display:block;margin-top:2px;font-size:14px}.perf-status{min-height:20px;margin-top:8px;color:var(--muted);font-size:12px}@media(max-width:700px){.perf-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.gauge{width:96px;height:96px}.gauge::after{inset:9px}.gauge-value{font-size:20px}.perf-details{grid-template-columns:1fr}}
+@media(max-width:700px){body{overflow-x:hidden}.wrap{padding:10px}.card{padding:12px;margin-bottom:10px;border-radius:10px}.head{gap:8px;margin-bottom:12px}.head h1{font-size:21px;line-height:1.25}.head p{font-size:13px}.head-actions{width:100%;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.head-actions button{min-height:44px}.notice{padding:9px 10px;font-size:13px;line-height:1.55}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.stat{padding:10px}.stat b{font-size:14px;line-height:1.35}.stat small{font-size:11px}.actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.actions button{min-height:44px;padding:9px 8px}.rcon-row{flex-direction:column}.rcon-row button{min-height:44px}.login-row{flex-direction:column}.login-row button{min-height:44px}.perf-head{align-items:flex-start}.perf-grid{gap:8px}.perf-chart{margin-top:10px;padding:8px}.perf-chart canvas{height:110px}.perf-details{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.perf-detail{padding:8px}.perf-detail:last-child{grid-column:1/-1}.perf-detail b{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}\n@media(max-width:380px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.stat{padding:8px}.stat b{font-size:13px}.stat small{font-size:10px}.card h2{font-size:15px}.gauge{width:92px;height:92px}.gauge-value{font-size:19px}.gauge-sub{font-size:11px}}\n</style>
+<style>
+@media(max-width:380px){.gauge{width:92px;height:92px}.gauge-value{font-size:19px}.gauge-sub{font-size:11px}}
+</style>
+<style>
+@media(max-width:700px){
+  .columns{grid-template-columns:minmax(0,1fr);min-width:0}
+  .columns>div,.card,.actions,.table-wrap,.perf-grid,.perf-chart{min-width:0}
+  .actions{width:100%}
+  .actions button,.actions select{width:100%;min-width:0;white-space:normal;overflow-wrap:anywhere}
+  input,select{min-width:0;max-width:100%}
+  .notice,.muted,#accessInfo,#consoleHint{overflow-wrap:anywhere;word-break:break-word}
+  .table-wrap{width:100%;overflow-x:hidden}
+  table{width:100%;table-layout:fixed}
+  th,td{white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+  th:first-child,td:first-child{width:34%}
+  th:nth-child(2),td:nth-child(2){width:50%}
+  th:nth-child(3),td:nth-child(3){width:16%}
+  #logName{font-size:13px}
+  #logOutput,#rconOutput{max-width:100%;overflow-x:auto}
+  .rcon-row{min-width:0;width:100%}
+  .rcon-row input,.rcon-row button{width:100%;min-width:0}
+}
 </style>
 </head>
 <body>

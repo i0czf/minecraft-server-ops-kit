@@ -22,6 +22,27 @@
 - 本地 RCON 自动配置：生成或轮换密码，敏感值不写入公版模板
 - 公版、精简包和玩家拉新包构建器
 
+#### Web 运维面板（可选）
+
+无需 IIS、Node、Python 或第三方 CDN，即可在服务端本机启动轻量 Web 运维面板，通过浏览器查看和操作服务器：
+
+- 状态与性能：Minecraft、RCON、更新服务、运维 PID、备份概览，以及 CPU/GPU/内存/磁盘和最近 5 分钟趋势；
+- 服务端控制：启动、重启、停止、仅发布更新、立即备份、健康体检、运行报告、事故复盘和验证备份；
+- 运维与观察：启动/重启/停止运维监控，读取允许的日志末尾，提供在线玩家、TPS、白天、天气和存档等 RCON 快捷操作；
+- 手机端适配：360–390px 窄屏下按钮保持双列触控布局，长文件名、日志、RCON 和访问信息自动换行，页面不再被横向滚动撑开；
+- 安全边界：默认只监听 `127.0.0.1`，首次启动生成随机令牌，任意 RCON 控制台默认关闭；远程访问优先使用 SSH/VPN 隧道。
+
+下面是实际手机端运行截图，展示性能监控、服务端/运维控制、日志与 RCON 三组场景；点击图片可查看原图。
+
+<p align="center">
+  <a href="docs/assets/web-panel-mobile-performance.jpg"><img src="docs/assets/web-panel-mobile-performance.jpg" alt="Web 面板手机端性能监控" width="31%"></a>
+  <a href="docs/assets/web-panel-mobile-control.jpg"><img src="docs/assets/web-panel-mobile-control.jpg" alt="Web 面板手机端服务端和运维控制" width="31%"></a>
+  <a href="docs/assets/web-panel-mobile-logs-rcon.jpg"><img src="docs/assets/web-panel-mobile-logs-rcon.jpg" alt="Web 面板手机端日志与 RCON" width="31%"></a>
+</p>
+<p align="center"><sub>性能监控　·　服务端与运维控制　·　日志、RCON 与访问信息</sub></p>
+
+完整的访问方式、SSH/VPN 隧道、端口映射、令牌轮换和手机端布局说明见 [`docs/web-panel-网页远程运维.md`](docs/web-panel-网页远程运维.md)。
+
 真实运行中的控制面板如下，启动、运维监控、发布/拉新、工具包更新和 RCON 快捷控制台都集中在同一个入口：
 
 ![真实服务器运维控制面板](docs/assets/control-panel-overview.png)

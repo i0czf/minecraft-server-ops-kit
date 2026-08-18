@@ -510,6 +510,7 @@ $files = @(
     '一键脚本\一键客户端自助修复.bat',
     '一键脚本\一键便携-事故自动复盘.bat',
     '一键脚本\一键便携-BlueMap时光机.bat',
+    'docs\web-panel-网页远程运维.md',
     'docs\portable-server-kit.md',
     'docs\qq-ai-provider-switch.md',
     'tools\portable-pack.example.json',
