@@ -11,6 +11,7 @@ $PerfPidPath = Join-Path $Root "tmp\perf-sampler.pid"
 $OpsSupervisorPidPath = Join-Path $Root "tmp\ops-supervisor.pid"
 $ConsolePidPath = Join-Path $Root "tmp\discord-console.pid"
 $QQConsolePidPath = Join-Path $Root "tmp\qq-console.pid"
+$ImageHostPidPath = Join-Path $Root "tmp\image-host.pid"
 
 # PID 会被系统回收给无关进程。只凭 Get-Process -Id 判断，轻则误报「运行中」，
 # 重则下面的 Stop-Process -Force 把那个无关进程直接杀掉（可能是浏览器甚至系统进程）。
@@ -139,7 +140,8 @@ Stop-TrackedProcess -PidFile $BackupPidPath -Label '备份调度'
 Stop-TrackedProcess -PidFile $PerfPidPath -Label '性能黑匣子'
 Stop-TrackedProcess -PidFile $ConsolePidPath -Label 'Discord 频道反控桥'
 Stop-TrackedProcess -PidFile $QQConsolePidPath -Label 'QQ 群反控桥'
-Stop-CommandLineMatch -Pattern 'discord-watch\.ps1|backup-scheduler\.ps1|perf-sampler\.ps1|ops-supervisor\.ps1|DiscordConsoleBridge|QQConsoleBridge' -Label '运维监控'
+Stop-TrackedProcess -PidFile $ImageHostPidPath -Label '本机图床'
+Stop-CommandLineMatch -Pattern 'discord-watch\.ps1|backup-scheduler\.ps1|perf-sampler\.ps1|ops-supervisor\.ps1|image-host-server\.py|DiscordConsoleBridge|QQConsoleBridge' -Label '运维监控'
 Stop-LegacyRelativeConsoleBridge
 $llbotDir = Join-Path $Root 'tools\LLBot-CLI-win-x64'
 Stop-KnownPathProcess -Label 'LLBot 机器人运行时' -Paths @(
@@ -147,6 +149,6 @@ Stop-KnownPathProcess -Label 'LLBot 机器人运行时' -Paths @(
     (Join-Path $llbotDir 'bin\llbot\node.exe')
 )
 Clear-MonitorLocks
-Write-Host '[运维] 运维监控已停止（Discord + QQ + LLBot + 备份 + 性能黑匣子 + 自愈看门狗）；Minecraft 服务端进程不受影响。' -ForegroundColor Green
+Write-Host '[运维] 运维监控已停止（Discord + QQ + 图床 + LLBot + 备份 + 性能黑匣子 + 自愈看门狗）；Minecraft 服务端进程不受影响。' -ForegroundColor Green
 
 if (-not $NoPause) { pause }

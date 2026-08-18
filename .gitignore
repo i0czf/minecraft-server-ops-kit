@@ -14,6 +14,7 @@ tools/*.exe
 # Private/local configuration
 tools/portable-pack.json
 tools/ops-config.json
+tools/image-host-tokens.json
 tools/toolkit-update-source.txt
 .update-server-token
 server.properties
