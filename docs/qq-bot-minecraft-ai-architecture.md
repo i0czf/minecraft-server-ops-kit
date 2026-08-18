@@ -94,7 +94,17 @@ QQ 群消息 → OneBot WebSocket → QQConsoleBridge → 权限/命令路由 �
 
 管理命令包括在线列表、TPS、时间、规则、备份、存盘、天气、公告、停服/重启和任意 RCON。
 
-权限分为公共命令、主群群主/管理员命令，以及跨群生效的 `qq.adminIds` 白名单。客群只信任白名单，不信任对方群管理员身份。
+权限分为公共命令、主群群主/管理员命令，以及跨群生效的 `qq.adminIds` 白名单。客群不信任对方群管理员身份。
+
+### 客群实验边界
+
+`qq.guestGroupIds` 用于声明实验性客群。默认 `guestMemberAccess=false`，普通群友不会触发机器人；打开后，普通群友只可使用实验白名单、`@机器人` AI 问答和引用图片的图床功能。客群中的 `!` 指令必须与 `@机器人` 出现在同一条消息里，单独发送会静默忽略。
+
+`qq.guestReadOnly=true` 时客群强制只读，即使发送者在 `adminIds` 白名单中，也不能执行 RCON、配置修改、备份、停服、重启或模组发布。客群聊天不转发到 Minecraft 公屏，AI 会话也不与主群混用。
+
+### `!wiki` 模组资料查询
+
+`!wiki <模组名>` 会查询模组标题、简介以及 MC 百科、CurseForge、Modrinth 链接。MC 百科简介解析优先使用 `class-menu-main` 与 `data-frame="2"` 的正文区，兼容旧版“模组介绍”“Mod介绍”“简介”等标记，跳过“介绍/简介”小标题并合并正文前两段；如果百科简介不可用，则回退到 Modrinth 简介。
 
 RCON 优先使用 Java 内置 FastRCON，失败时回退到 `tools/rcon-command.ps1`，并且只连接本机 RCON 端口。
 
