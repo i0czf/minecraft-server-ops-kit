@@ -245,18 +245,23 @@
                         "peakPlayerSafeRadius":  12
                     },
     "imageHost":  {
-                      "_说明":  "本机图床。引用 QQ 图片或表情包后发 !转图床 / !上传图床。公开模板默认关闭。token 留空，用 tokensFile+tokenLabel 指向已有令牌文件，不要把密钥写进本模板。",
+                      "_说明":  "本机图床。enabled=true 且 autoRelay=true 后，QQ 普通聊天里的图片/表情包会自动转存；minecraftBaseUrl 必须是所有 Minecraft 客户端能访问的公链地址，不能填机器人所在机器的 127.0.0.1 或仅局域网地址。minecraftImageMode 可填 link、chatimage 或 imagepreviewer。bindHost 默认只监听本机；公链访问时改为 0.0.0.0，并在防火墙/路由器只放行对应端口。手动 !转图床 仍可用。请复制 tools/image-host-tokens.example.json 为 tools/image-host-tokens.json 并修改令牌，不要把密钥写进本模板。",
                       "enabled":  false,
                       "memberAccess":  true,
+                      "autoRelay":  true,
                       "uploadUrl":  "http://127.0.0.1:38080/upload",
                       "publicBaseUrl":  "http://127.0.0.1:38080",
                       "lanBaseUrl":  "",
-                      "tokensFile":  "",
-                      "tokenLabel":  "",
+                      "bindHost":  "127.0.0.1",
+                      "minecraftBaseUrl":  "",
+                      "minecraftImageMode":  "link",
+                      "tokensFile":  "tools/image-host-tokens.json",
+                      "tokenLabel":  "qq-chat-relay",
                       "timeoutSeconds":  30,
                       "maxBytes":  20971520,
                       "cooldownSeconds":  8,
-                      "root":  "",
+                      "relayCacheMinutes":  1440,
+                      "root":  "tmp/image-host",
                       "port":  38080
                   },
     "modRelease":  {

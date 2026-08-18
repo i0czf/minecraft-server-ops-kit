@@ -1,0 +1,10 @@
+{
+  "_说明": "复制为 image-host-tokens.json 后，把 token 换成随机长令牌；不要把真实令牌提交到 Git。",
+  "tokens": [
+    {
+      "label": "qq-chat-relay",
+      "token": "CHANGE-ME-use-a-long-random-token",
+      "active": true
+    }
+  ]
+}

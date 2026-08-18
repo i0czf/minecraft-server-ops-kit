@@ -70,7 +70,15 @@
 - RCON 命令、备份、存盘、天气、种子、在线列表和 TPS 查询
 - 高危操作确认码、审计记录和重复操作保护
 - 可选 AI 运维助手：读取日志、崩溃报告、模组列表、配置和性能信息，帮助定位问题
-- 可选 DDNS、图片转发、模组发布事务和摄像机视角能力
+- 可选 DDNS、QQ 图片/表情包自动转存图床并转发到 Minecraft、模组发布事务和摄像机视角能力
+
+#### QQ 图片与表情包的游戏内预览
+
+安装与当前 Minecraft/NeoForge 版本匹配的 ChatImage 客户端 Mod 后，QQ群里的普通图片和表情包会先转存到可被玩家访问的图床，再通过 `CICode` 在 Minecraft 聊天中直接预览；消息标签仍区分为`[图片]`和`[表情包]`。下面是 NeoForge 1.21.1 / 21.1.235 实服的真实效果截图：
+
+![QQ 普通图片的 ChatImage 游戏内预览实测](docs/assets/qq-chatimage-image-preview.png)
+
+![QQ 表情包的 ChatImage 游戏内预览实测](docs/assets/qq-chatimage-sticker-preview.png)
 
 QQ 与 Minecraft 的实际双向消息链路如下：
 

@@ -538,6 +538,9 @@ $files = @(
     'tools\zip-with-unix-mode.py',
     'tools\start-ops-monitor.ps1',
     'tools\stop-ops-monitor.ps1',
+    'tools\image-host-server.py',
+    'tools\start-image-host.ps1',
+    'tools\image-host-tokens.example.json',
     'tools\enable-local-rcon.ps1',
     'tools\ddns-update.ps1',
     'tools\discord-watch.ps1',
@@ -608,7 +611,8 @@ $files = @(
     'docs\玩家指南-后台自动更新.md',
     'docs\qq-bot-minecraft-ai-architecture.md',
     'docs\qq-item-aspect-index-要素物品反查.md',
-    'docs\玩家拉新公版.md'
+    'docs\玩家拉新公版.md',
+    'docs\PF-GUGUBot功能核查与跟进方案.md'
 )
 
 # Discord 频道相关组件（反控桥/webhook 发送器/编译脚本）只随私用包分发：

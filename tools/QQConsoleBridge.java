@@ -95,6 +95,20 @@ public class QQConsoleBridge {
     private final java.util.Map<Long, Long> memberAiLast = new java.util.HashMap<>();
     // 转图床冷却（QQ号 -> 上次成功/尝试毫秒）
     private final java.util.Map<Long, Long> imageHostLast = new ConcurrentHashMap<>();
+    // 普通 QQ→Minecraft 聊天独立排队：图片自动转存可能需要访问 OneBot/图床，不能阻塞 WebSocket 事件线程。
+    // 单线程保证图片上传完成后的公屏顺序与 QQ 入站顺序一致；队列满时回到调用线程形成自然背压，不静默丢消息。
+    private final java.util.concurrent.ExecutorService qqChatRelayExecutor =
+            new java.util.concurrent.ThreadPoolExecutor(
+                    1, 1, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
+                    new java.util.concurrent.ArrayBlockingQueue<>(128),
+                    task -> {
+                        Thread thread = new Thread(task, "qq-chat-relay");
+                        thread.setDaemon(true);
+                        return thread;
+                    },
+                    new java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy());
+    // 图床转存缓存：同一 QQ 图片短时间重复出现时不重复下载/上传。
+    private final java.util.Map<String, RelayImageCacheEntry> relayImageCache = new ConcurrentHashMap<>();
     // 滚动群聊缓冲（记录谁说了什么），供 AI 通过 read_recent_chat 了解群里聊了啥。
     // 按群号隔离：主群与各客群各存各的，AI 在哪个群提问就只读那个群的记录，互不串味、不污染。
     private final java.util.Map<String, java.util.ArrayDeque<String>> chatBuffers = new java.util.HashMap<>();
@@ -520,8 +534,12 @@ public class QQConsoleBridge {
             if (config.imageHost.enabled) {
                 log("图床已接入：upload=" + config.imageHost.uploadUrl
                         + " public=" + config.imageHost.publicBaseUrl
+                        + " minecraft=" + firstNonBlank(config.imageHost.minecraftBaseUrl,
+                                config.imageHost.publicBaseUrl, config.imageHost.lanBaseUrl)
                         + " label=" + (config.imageHost.tokenLabel.isBlank() ? "-" : config.imageHost.tokenLabel)
                         + " memberAccess=" + config.imageHost.memberAccess
+                        + " autoRelay=" + config.imageHost.autoRelay
+                        + " imageMode=" + normalizeMinecraftImageMode(config.imageHost.minecraftImageMode)
                         + " tokenReady=" + !resolveImageHostToken().isBlank());
             }
         } catch (Exception ex) {
@@ -705,11 +723,16 @@ public class QQConsoleBridge {
         String nickname = jsonString(senderJson, "nickname");
         String card = jsonString(senderJson, "card");
         String content = jsonString(json, "raw_message");
+        String messageJson = jsonArray(json, "message");
         if (content.isBlank())
             content = jsonString(json, "message");
+        // OneBot v11 的 message 可能只有数组形态，没有 raw_message 字符串。
+        // 先归一成 CQ 文本供现有命令/AI 路由继续工作，同时把原数组保留给富消息渲染。
+        if (content.isBlank() && !messageJson.isBlank())
+            content = onebotMessageArrayToCq(messageJson);
 
         String role = jsonString(senderJson, "role");
-        QQMessage msg = new QQMessage(msgId, content, userId, nickname, card, role, gid);
+        QQMessage msg = new QQMessage(msgId, content, userId, nickname, card, role, gid, messageJson);
         log("收到群消息：sender=" + nickname + "(" + userId + ") content=" + truncate(content, 200));
         try {
             handleMessage(msg);
@@ -1096,10 +1119,10 @@ public class QQConsoleBridge {
         String displayName = (msg.card != null && !msg.card.isBlank()) ? msg.card : msg.nickname;
 
         // 记录群聊到滚动缓冲（供 AI read_recent_chat 了解群里聊了啥）；机器人自己的消息在方法开头已跳过
-        // 用 cqToReadable 而非 stripCQ：把图片/表情/@ 转成可读标记，别把「发了张图」这类上下文丢了
+        // 用消息段可读化而非 stripCQ：把图片/表情/@ 转成可读标记，别把「发了张图」这类上下文丢了
         // 按群隔离：主群与各客群各记各的（缓冲区+日志档都按群号分开）。客群里所有人的发言都记为上下文，
         // 让 AI 能在客群里读懂群里在聊啥、能引用/点评群友——但「记录」与「能否触发命令」是两回事，见下方围栏。
-        recordChat(msg.group, displayName, cqToReadable(content));
+        recordChat(msg.group, displayName, messageToReadable(msg));
 
         // 客群访问开关：关闭时维持旧行为（非白名单只记录上下文，不响应）；打开后继续走下面的
         // 实验白名单/@AI/图床路由，服务器控制命令仍由 guestReadOnly 硬围栏拒绝。
@@ -1183,10 +1206,10 @@ public class QQConsoleBridge {
             // 客群里的闲聊不转发进游戏公屏（只有命令/@AI 才由白名单在客群里触发）
             if (!homeGroup)
                 return;
-            String clean = stripCQ(content);
-            if (clean.isBlank())
+            List<QQMessageSegment> segments = messageSegments(msg);
+            if (segments.isEmpty())
                 return;
-            relayQQChat(msg.group, displayName, clean);
+            enqueueRelayQQChat(msg.group, displayName, segments);
             return;
         }
 
@@ -2101,19 +2124,504 @@ public class QQConsoleBridge {
     }
 
     void relayQQChat(String group, String displayName, String content) {
-        if (content.isBlank())
+        relayQQChat(group, displayName, parseCqMessageSegments(content));
+    }
+
+    void enqueueRelayQQChat(String group, String displayName, List<QQMessageSegment> segments) {
+        if (segments == null || segments.isEmpty())
             return;
+        List<QQMessageSegment> snapshot = List.copyOf(segments);
+        qqChatRelayExecutor.execute(() -> relayQQChat(group, displayName, snapshot));
+    }
+
+    void relayQQChat(String group, String displayName, List<QQMessageSegment> segments) {
+        if (segments == null || segments.isEmpty())
+            return;
+        List<QQMessageSegment> prepared = prepareRelaySegments(segments);
         // groupLabels 有值才带 [群名] 前缀；官服主群可不配/留空，公屏更短不挡视野
         String label = config.groupLabel(group);
-        String text = label.isBlank()
-                ? displayName + ": " + content
-                : "[" + label + "] " + displayName + ": " + content;
+        String prefix = label.isBlank()
+                ? displayName + ": "
+                : "[" + label + "] " + displayName + ": ";
+        prefix = truncate(prefix, 96);
+        String tellraw = renderMinecraftTellraw(prefix, prepared);
+        if (tellraw.isBlank())
+            return;
         try {
-            runRcon("tellraw @a {\"text\":\""
-                    + jsonEscapeAscii(truncate(text, 220)) + "\",\"color\":\"green\"}");
+            runRcon("tellraw @a " + tellraw);
         } catch (Exception ex) {
             log("QQ 聊天转发到游戏失败：" + messageOf(ex));
         }
+    }
+
+    List<QQMessageSegment> prepareRelaySegments(List<QQMessageSegment> segments) {
+        ImageHostConfig imageHost = config.imageHost;
+        if (!imageHost.enabled || !imageHost.autoRelay)
+            return segments;
+        String token = resolveImageHostToken();
+        if (token.isBlank())
+            return segments;
+        List<QQMessageSegment> result = new ArrayList<>(segments.size());
+        for (QQMessageSegment segment : segments) {
+            if (isRelayImageSegment(segment))
+                result.add(autoRelayImageSegment(segment, token));
+            else
+                result.add(segment);
+        }
+        return result;
+    }
+
+    static boolean isRelayImageSegment(QQMessageSegment segment) {
+        if (segment == null)
+            return false;
+        String type = segment.type().toLowerCase(java.util.Locale.ROOT);
+        return type.equals("image") || type.equals("mface")
+                || type.equals("marketface") || type.equals("bface");
+    }
+
+    QQMessageSegment autoRelayImageSegment(QQMessageSegment segment, String token) {
+        if (segment == null || token == null || token.isBlank())
+            return segment;
+        String direct = safeRelayUrl(firstNonBlank(segment.value("url"), segment.value("file"),
+                segment.value("path")));
+        if (isOwnImageHostUrl(direct))
+            return segment;
+        String sourceKey = relayImageSourceKey(segment);
+        String cached = cachedRelayImageUrl(sourceKey);
+        if (!cached.isBlank())
+            return withRelayImageUrl(segment, cached);
+
+        Path local = null;
+        try {
+            String cq = segmentToCq(segment);
+            if (cq.isBlank())
+                return segment;
+            local = downloadCqImageBest(cq);
+            if (local == null || !Files.isRegularFile(local))
+                return segment;
+            long size = Files.size(local);
+            if (size <= 0 || size > config.imageHost.maxBytes)
+                return segment;
+            byte[] bytes = Files.readAllBytes(local);
+            if (bytes.length == 0 || bytes.length > config.imageHost.maxBytes)
+                return segment;
+
+            String digest = sha256Hex(bytes);
+            String digestKey = "sha256:" + digest;
+            cached = cachedRelayImageUrl(digestKey);
+            if (!cached.isBlank()) {
+                putRelayImageCache(sourceKey, cached);
+                return withRelayImageUrl(segment, cached);
+            }
+
+            String ext = detectImageExt(bytes);
+            if (ext == null)
+                return segment;
+            String original = firstNonBlank(segment.value("file"), segment.value("name"), "qq-image");
+            ImageHostUploadResult uploaded = uploadToImageHost(
+                    bytes, asciiImageUploadName(original, ext), token);
+            if (!uploaded.ok || uploaded.name.isBlank())
+                return segment;
+            String hosted = imageHostObjectUrl(uploaded.name);
+            if (safeRelayUrl(hosted).isBlank()) {
+                log("QQ 图片自动转存成功，但 imageHost.minecraftBaseUrl/publicBaseUrl 不可用，回退原图链接");
+                return segment;
+            }
+            putRelayImageCache(sourceKey, hosted);
+            putRelayImageCache(digestKey, hosted);
+            log("QQ 图片已自动转存图床：name=" + uploaded.name + " size=" + bytes.length);
+            return withRelayImageUrl(segment, hosted);
+        } catch (Exception ex) {
+            log("QQ 图片自动转存失败，已回退原图链接：" + messageOf(ex));
+            return segment;
+        } finally {
+            cleanupDownloadedMedia(local);
+        }
+    }
+
+    static String relayImageSourceKey(QQMessageSegment segment) {
+        if (segment == null)
+            return "";
+        String source = firstNonBlank(segment.value("file_id"), segment.value("file"),
+                segment.value("url"), segment.value("path"), segment.value("key"));
+        if (source.isBlank())
+            return "";
+        return "source:" + sha256Hex(segment.type() + ":" + source);
+    }
+
+    String cachedRelayImageUrl(String key) {
+        if (key == null || key.isBlank())
+            return "";
+        RelayImageCacheEntry entry = relayImageCache.get(key);
+        if (entry == null)
+            return "";
+        if (entry.expiresAtMs <= System.currentTimeMillis()) {
+            relayImageCache.remove(key, entry);
+            return "";
+        }
+        String url = safeRelayUrl(entry.url);
+        if (url.isBlank())
+            relayImageCache.remove(key, entry);
+        return url;
+    }
+
+    void putRelayImageCache(String key, String url) {
+        if (key == null || key.isBlank() || safeRelayUrl(url).isBlank())
+            return;
+        relayImageCache.put(key, new RelayImageCacheEntry(url,
+                System.currentTimeMillis() + Math.max(10, config.imageHost.relayCacheMinutes) * 60_000L));
+        while (relayImageCache.size() > 512) {
+            Iterator<String> iterator = relayImageCache.keySet().iterator();
+            if (!iterator.hasNext())
+                break;
+            relayImageCache.remove(iterator.next());
+        }
+    }
+
+    QQMessageSegment withRelayImageUrl(QQMessageSegment segment, String url) {
+        Map<String, String> data = new LinkedHashMap<>(segment.data());
+        data.put("url", url);
+        return new QQMessageSegment(segment.type(), data);
+    }
+
+    boolean isOwnImageHostUrl(String url) {
+        if (url == null || url.isBlank())
+            return false;
+        String base = trimTrailingSlash(firstNonBlank(config.imageHost.minecraftBaseUrl,
+                config.imageHost.publicBaseUrl, config.imageHost.lanBaseUrl));
+        return !base.isBlank() && url.startsWith(base + "/");
+    }
+
+    String imageHostObjectUrl(String name) {
+        String base = trimTrailingSlash(firstNonBlank(config.imageHost.minecraftBaseUrl,
+                config.imageHost.publicBaseUrl, config.imageHost.lanBaseUrl));
+        return base.isBlank() || name == null || name.isBlank() ? "" : base + "/i/" + name;
+    }
+
+    static final String[] MESSAGE_SEGMENT_DATA_KEYS = {
+            "text", "id", "qq", "user_id", "url", "file", "path", "file_id",
+            "file_size", "name", "summary", "subType", "sub_type", "emoji_id", "emoji_package_id",
+            "key", "title", "content", "prompt", "event"
+    };
+
+    static final Pattern CQ_MESSAGE_SEGMENT_PATTERN =
+            Pattern.compile("(?i)\\[CQ:([a-z0-9_-]+)([^\\]]*)\\]");
+
+    static final Map<String, String> QQ_FACE_LABELS = createQqFaceLabels();
+
+    List<QQMessageSegment> messageSegments(QQMessage msg) {
+        if (msg == null)
+            return List.of();
+        // 数组是信息最完整的形态，优先使用；没有数组时再解析 raw_message CQ 字符串。
+        List<QQMessageSegment> structured = parseOnebotMessageSegments(msg.messageJson());
+        return structured.isEmpty() ? parseCqMessageSegments(msg.content()) : structured;
+    }
+
+    String messageToReadable(QQMessage msg) {
+        String readable = messageSegmentsToReadable(messageSegments(msg));
+        if (!readable.isBlank())
+            return readable;
+        return msg == null ? "" : cqToReadable(msg.content());
+    }
+
+    static List<QQMessageSegment> parseOnebotMessageSegments(String arrayJson) {
+        List<QQMessageSegment> result = new ArrayList<>();
+        if (arrayJson == null || arrayJson.isBlank() || !arrayJson.trim().startsWith("["))
+            return result;
+        for (String node : topLevelObjects(arrayJson)) {
+            String type = jsonString(node, "type").trim().toLowerCase(java.util.Locale.ROOT);
+            if (type.isBlank())
+                continue;
+            String dataJson = jsonObject(node, "data");
+            Map<String, String> data = new LinkedHashMap<>();
+            for (String key : MESSAGE_SEGMENT_DATA_KEYS) {
+                String value = jsonSegmentValue(dataJson, key);
+                if (!value.isBlank())
+                    data.put(key, value);
+            }
+            result.add(new QQMessageSegment(type, data));
+        }
+        return result;
+    }
+
+    static String jsonSegmentValue(String json, String key) {
+        if (json == null || json.isBlank() || key == null || key.isBlank())
+            return "";
+        String value = jsonString(json, key);
+        if (!value.isBlank())
+            return value;
+        return jsonNumber(json, key);
+    }
+
+    static List<QQMessageSegment> parseCqMessageSegments(String raw) {
+        List<QQMessageSegment> result = new ArrayList<>();
+        if (raw == null || raw.isBlank())
+            return result;
+        Matcher matcher = CQ_MESSAGE_SEGMENT_PATTERN.matcher(raw);
+        int last = 0;
+        while (matcher.find()) {
+            if (matcher.start() > last)
+                result.add(new QQMessageSegment("text",
+                        Map.of("text", raw.substring(last, matcher.start()))));
+            Map<String, String> data = new LinkedHashMap<>();
+            String body = matcher.group(2);
+            for (String part : body.split(",")) {
+                int equals = part.indexOf('=');
+                if (equals <= 0)
+                    continue;
+                String key = part.substring(0, equals).trim().toLowerCase(java.util.Locale.ROOT);
+                String value = cqUnescape(part.substring(equals + 1).trim());
+                if (!key.isBlank())
+                    data.put(key, value);
+            }
+            result.add(new QQMessageSegment(matcher.group(1).toLowerCase(java.util.Locale.ROOT), data));
+            last = matcher.end();
+        }
+        if (last < raw.length())
+            result.add(new QQMessageSegment("text", Map.of("text", raw.substring(last))));
+        if (result.isEmpty())
+            result.add(new QQMessageSegment("text", Map.of("text", raw)));
+        return result;
+    }
+
+    static String onebotMessageArrayToCq(String arrayJson) {
+        StringBuilder result = new StringBuilder();
+        for (QQMessageSegment segment : parseOnebotMessageSegments(arrayJson))
+            result.append(segmentToCq(segment));
+        return result.toString();
+    }
+
+    static String segmentToCq(QQMessageSegment segment) {
+        if (segment == null)
+            return "";
+        String type = segment.type();
+        if ("text".equals(type))
+            return segment.value("text");
+        StringBuilder result = new StringBuilder("[CQ:").append(type);
+        for (String key : MESSAGE_SEGMENT_DATA_KEYS) {
+            String value = segment.value(key);
+            if (value.isBlank() || "text".equals(key))
+                continue;
+            result.append(',').append(key).append('=').append(cqEscape(value));
+        }
+        return result.append(']').toString();
+    }
+
+    static String messageSegmentsToReadable(List<QQMessageSegment> segments) {
+        if (segments == null || segments.isEmpty())
+            return "";
+        StringBuilder result = new StringBuilder();
+        for (QQMessageSegment segment : segments) {
+            if (segment == null)
+                continue;
+            String type = segment.type().toLowerCase(java.util.Locale.ROOT);
+            switch (type) {
+                case "text" -> result.append(segment.value("text"));
+                case "image" -> result.append(isAnimatedSegment(segment) ? "[表情包]" : "[图片]");
+                case "mface", "marketface", "bface" -> result.append(segmentEmojiLabel(segment));
+                case "face" -> {
+                    String faceId = firstNonBlank(segment.value("id"), segment.value("face_id"));
+                    String faceName = qqFaceLabel(faceId);
+                    result.append(faceName.isBlank() ? "[表情]" : "[表情:" + faceName + "]");
+                }
+                case "at" -> result.append('@')
+                        .append(firstNonBlank(segment.value("qq"), segment.value("user_id"), "未知"));
+                case "reply" -> result.append("[回复]");
+                case "record", "audio" -> result.append("[语音]");
+                case "video" -> result.append("[视频]");
+                case "file" -> {
+                    String name = firstNonBlank(segment.value("name"), segment.value("file"));
+                    result.append(name.isBlank() ? "[文件]" : "[文件:" + truncate(name, 40) + "]");
+                }
+                case "forward", "node" -> result.append("[合并转发的聊天记录]");
+                case "json", "xml" -> result.append("[卡片分享]");
+                case "dice" -> result.append("[骰子表情]");
+                case "rps" -> result.append("[猜拳表情]");
+                case "poke" -> result.append("[戳一戳]");
+                case "shake" -> result.append("[窗口抖动]");
+                default -> result.append('[').append(truncate(type, 24)).append(']');
+            }
+        }
+        return result.toString().trim();
+    }
+
+    static boolean isAnimatedSegment(QQMessageSegment segment) {
+        if (segment == null)
+            return false;
+        String summary = segment.value("summary");
+        String subtype = firstNonBlank(segment.value("subType"), segment.value("sub_type"),
+                segment.value("subtype"));
+        String file = firstNonBlank(segment.value("file"), segment.value("name"));
+        String lowerFile = file.toLowerCase(java.util.Locale.ROOT);
+        return summary.contains("动画表情") || summary.contains("表情包")
+                // OneBot/NapCat 的 image 子类型字段有时没有 summary，只能从 subtype 判断。
+                || subtype.equals("1") || subtype.equals("2")
+                || lowerFile.endsWith(".gif") || lowerFile.endsWith(".webp")
+                || lowerFile.endsWith(".apng");
+    }
+
+    static String segmentEmojiLabel(QQMessageSegment segment) {
+        String summary = segment == null ? "" : segment.value("summary");
+        String normalized = summary.replace("[", "").replace("]", "").trim();
+        if (summary.isBlank() || summary.contains("动画表情") || normalized.equals("表情包"))
+            return "[表情包]";
+        return "[表情包:" + truncate(summary, 32) + "]";
+    }
+
+    static String qqFaceLabel(String id) {
+        if (id == null || id.isBlank())
+            return "";
+        String label = QQ_FACE_LABELS.get(id);
+        return label == null || label.isBlank() ? "#" + truncate(id, 12) : label;
+    }
+
+    String renderMinecraftTellraw(String prefix, List<QQMessageSegment> segments) {
+        List<String> components = new ArrayList<>();
+        if (prefix != null && !prefix.isBlank())
+            components.add(minecraftTextComponent(prefix, "green"));
+        int textBudget = 220;
+        int count = 0;
+        for (QQMessageSegment segment : segments) {
+            if (segment == null || count++ >= 32)
+                break;
+            String type = segment.type().toLowerCase(java.util.Locale.ROOT);
+            switch (type) {
+                case "text" -> {
+                    if (textBudget <= 0)
+                        continue;
+                    String text = truncate(segment.value("text"), textBudget);
+                    if (!text.isBlank()) {
+                        components.add(minecraftTextComponent(text, "green"));
+                        textBudget -= text.length();
+                    }
+                }
+                case "image" -> {
+                    String url = safeRelayUrl(firstNonBlank(segment.value("url"), segment.value("file"),
+                            segment.value("path")));
+                    components.add(renderMinecraftImageComponent(
+                            isAnimatedSegment(segment) ? "[表情包]" : "[图片]", url));
+                }
+                case "mface", "marketface", "bface" -> {
+                    String url = safeRelayUrl(firstNonBlank(segment.value("url"), segment.value("file"),
+                            segment.value("path")));
+                    String label = segmentEmojiLabel(segment);
+                    components.add(renderMinecraftImageComponent(label, url));
+                }
+                case "face" -> {
+                    String face = qqFaceLabel(firstNonBlank(segment.value("id"), segment.value("face_id")));
+                    components.add(minecraftTextComponent(
+                            face.isBlank() ? "[表情]" : "[表情:" + face + "]", "aqua"));
+                }
+                case "at" -> components.add(minecraftTextComponent("@"
+                        + firstNonBlank(segment.value("qq"), segment.value("user_id"), "未知"), "yellow"));
+                case "reply" -> components.add(minecraftTextComponent("[回复]", "gray"));
+                case "record", "audio" -> components.add(minecraftTextComponent("[语音]", "aqua"));
+                case "video" -> components.add(minecraftTextComponent("[视频]", "aqua"));
+                case "file" -> components.add(minecraftTextComponent("[文件]", "aqua"));
+                case "forward", "node" -> components.add(minecraftTextComponent("[合并转发]", "aqua"));
+                case "json", "xml" -> components.add(minecraftTextComponent("[卡片分享]", "aqua"));
+                case "dice" -> components.add(minecraftTextComponent("[骰子表情]", "aqua"));
+                case "rps" -> components.add(minecraftTextComponent("[猜拳表情]", "aqua"));
+                case "poke" -> components.add(minecraftTextComponent("[戳一戳]", "aqua"));
+                case "shake" -> components.add(minecraftTextComponent("[窗口抖动]", "aqua"));
+                default -> components.add(minecraftTextComponent("[" + truncate(type, 24) + "]", "gray"));
+            }
+        }
+        return components.isEmpty() ? "" : "[" + String.join(",", components) + "]";
+    }
+
+    String renderMinecraftImageComponent(String label, String url) {
+        if (url == null || url.isBlank())
+            return minecraftTextComponent(label, "aqua");
+        String mode = normalizeMinecraftImageMode(config.imageHost.minecraftImageMode);
+        if (mode.equals("chatimage") && !url.contains(",") && !url.contains("[") && !url.contains("]")) {
+            String name = truncate((label == null ? "图片" : label)
+                    .replace('[', ' ').replace(']', ' ').replace(',', ' ').trim(), 24);
+            String cicode = "[[CICode,url=" + url + ",name=" + (name.isBlank() ? "图片" : name) + "]]";
+            return minecraftActionComponent(cicode, "gold", "点击打开图片\\n" + url,
+                    "open_url", url);
+        }
+        if (mode.equals("imagepreviewer"))
+            return minecraftActionComponent(label, "aqua", "点击预览图片\\n" + url,
+                    "run_command", "/imagepreview preview " + url + " 60");
+        return minecraftLinkComponent(label, url);
+    }
+
+    static String normalizeMinecraftImageMode(String mode) {
+        if (mode == null)
+            return "link";
+        String value = mode.trim().toLowerCase(java.util.Locale.ROOT);
+        if (value.equals("chatimage") || value.equals("cicode"))
+            return "chatimage";
+        if (value.equals("imagepreviewer") || value.equals("imagepreview"))
+            return "imagepreviewer";
+        return "link";
+    }
+
+    static String minecraftTextComponent(String text, String color) {
+        return "{\"text\":\"" + jsonEscapeAscii(text == null ? "" : text)
+                + "\",\"color\":\"" + (color == null || color.isBlank() ? "white" : color) + "\"}";
+    }
+
+    static String minecraftLinkComponent(String label, String url) {
+        return minecraftActionComponent(label, "aqua", "点击打开图片\\n" + url,
+                "open_url", url);
+    }
+
+    static String minecraftActionComponent(String label, String color, String hover,
+            String action, String value) {
+        return "{\"text\":\"" + jsonEscapeAscii(label)
+                + "\",\"color\":\"" + (color == null || color.isBlank() ? "white" : color)
+                + "\",\"underlined\":true"
+                + ",\"hoverEvent\":{\"action\":\"show_text\",\"contents\":\""
+                + jsonEscapeAscii(hover) + "\"}"
+                + ",\"clickEvent\":{\"action\":\"" + jsonEscapeAscii(action)
+                + "\",\"value\":\"" + jsonEscapeAscii(value) + "\"}}";
+    }
+
+    static String safeRelayUrl(String raw) {
+        if (raw == null || raw.isBlank())
+            return "";
+        String url = cqUnescape(raw).trim();
+        if (url.length() > 1200
+                || !(url.startsWith("http://") || url.startsWith("https://")))
+            return "";
+        for (int i = 0; i < url.length(); i++) {
+            char c = url.charAt(i);
+            if (Character.isWhitespace(c) || c < 0x20)
+                return "";
+        }
+        try {
+            URI parsed = URI.create(url);
+            if (parsed.getHost() == null || parsed.getHost().isBlank())
+                return "";
+        } catch (IllegalArgumentException ex) {
+            return "";
+        }
+        return url;
+    }
+
+    static Map<String, String> createQqFaceLabels() {
+        Map<String, String> labels = new HashMap<>();
+        String[][] entries = {
+                {"0", "微笑"}, {"1", "撇嘴"}, {"2", "色"}, {"3", "发呆"},
+                {"4", "得意"}, {"5", "流泪"}, {"6", "害羞"}, {"7", "闭嘴"},
+                {"8", "睡"}, {"9", "大哭"}, {"10", "尴尬"}, {"11", "发怒"},
+                {"12", "调皮"}, {"13", "呲牙"}, {"14", "惊讶"}, {"15", "难过"},
+                {"16", "酷"}, {"18", "抓狂"}, {"19", "吐"}, {"20", "偷笑"},
+                {"21", "可爱"}, {"22", "白眼"}, {"23", "傲慢"}, {"24", "饥饿"},
+                {"25", "困"}, {"26", "惊恐"}, {"27", "流汗"}, {"28", "憨笑"},
+                {"29", "大兵"}, {"30", "奋斗"}, {"31", "咒骂"}, {"32", "疑问"},
+                {"33", "嘘"}, {"34", "晕"}, {"35", "折磨"}, {"36", "衰"},
+                {"37", "骷髅"}, {"38", "敲打"}, {"39", "再见"}, {"40", "擦汗"},
+                {"41", "抠鼻"}, {"42", "鼓掌"}, {"43", "糗大了"}, {"44", "坏笑"},
+                {"45", "左哼哼"}, {"46", "右哼哼"}, {"47", "哈欠"}, {"48", "鄙视"},
+                {"49", "委屈"}, {"50", "快哭了"}, {"51", "阴险"}, {"52", "亲亲"},
+                {"53", "吓"}, {"54", "可怜"}
+        };
+        for (String[] entry : entries)
+            labels.put(entry[0], entry[1]);
+        return Map.copyOf(labels);
     }
 
     // 从 [CQ:reply,id=..] 取回被引用消息的原文（谁说的+内容），拼给 AI 当上下文；顺带收集其中的图片 URL 和指纹
@@ -11776,7 +12284,23 @@ public class QQConsoleBridge {
     // ─── 内部类型 ──────────────────────────────────────────────────
 
     record QQMessage(long id, String content, long senderId, String nickname, String card, String role,
-            String group) {
+            String group, String messageJson) {
+    }
+
+    record QQMessageSegment(String type, Map<String, String> data) {
+        QQMessageSegment {
+            type = type == null ? "unknown" : type;
+            data = data == null ? Map.of() : Map.copyOf(data);
+        }
+
+        String value(String key) {
+            if (key == null || data == null)
+                return "";
+            return data.getOrDefault(key, "");
+        }
+    }
+
+    record RelayImageCacheEntry(String url, long expiresAtMs) {
     }
 
     record QuotedReleaseFile(String fileId, String fileName, long size, String originalUserId,
@@ -12451,15 +12975,22 @@ public class QQConsoleBridge {
     static class ImageHostConfig {
         boolean enabled = false;
         boolean memberAccess = true;
+        boolean autoRelay = true;
         String uploadUrl = "http://127.0.0.1:38080/upload";
         String publicBaseUrl = "http://image-host.CHANGE-ME:38080";
-        String lanBaseUrl = "http://192.168.31.47:38080";
+        String lanBaseUrl = "";
+        String bindHost = "127.0.0.1";        // 本机图床监听地址；远端客户端访问时按需改为局域网地址/0.0.0.0
+        // Minecraft 客户端能访问的图片地址；留空时按 publicBaseUrl，再退回 lanBaseUrl。
+        String minecraftBaseUrl = "";
+        // link=原版点击打开；chatimage=ChatImage CICode；imagepreviewer=ImagePreviewer 点击预览。
+        String minecraftImageMode = "link";
         String token = "";
         String tokensFile = "";
         String tokenLabel = "";
         int timeoutSeconds = 30;
         int maxBytes = 20 * 1024 * 1024;
         int cooldownSeconds = 8;
+        int relayCacheMinutes = 1440;
         String root = "";
         int port = 38080;
     }
@@ -12805,6 +13336,8 @@ public class QQConsoleBridge {
                     c.imageHost.enabled = jsonBoolean(ihJson, "enabled");
                 if (ihJson.contains("\"memberAccess\""))
                     c.imageHost.memberAccess = jsonBoolean(ihJson, "memberAccess");
+                if (ihJson.contains("\"autoRelay\""))
+                    c.imageHost.autoRelay = jsonBoolean(ihJson, "autoRelay");
                 String uploadUrl = jsonString(ihJson, "uploadUrl");
                 if (!uploadUrl.isBlank())
                     c.imageHost.uploadUrl = uploadUrl.trim();
@@ -12814,6 +13347,15 @@ public class QQConsoleBridge {
                 String lanBase = jsonString(ihJson, "lanBaseUrl");
                 if (!lanBase.isBlank())
                     c.imageHost.lanBaseUrl = lanBase.trim();
+                String bindHost = jsonString(ihJson, "bindHost");
+                if (!bindHost.isBlank())
+                    c.imageHost.bindHost = bindHost.trim();
+                String minecraftBase = jsonString(ihJson, "minecraftBaseUrl");
+                if (!minecraftBase.isBlank())
+                    c.imageHost.minecraftBaseUrl = minecraftBase.trim();
+                String imageMode = jsonString(ihJson, "minecraftImageMode");
+                if (!imageMode.isBlank())
+                    c.imageHost.minecraftImageMode = imageMode.trim();
                 c.imageHost.token = jsonString(ihJson, "token");
                 String tokensFile = jsonString(ihJson, "tokensFile");
                 if (!tokensFile.isBlank())
@@ -12824,6 +13366,8 @@ public class QQConsoleBridge {
                 c.imageHost.timeoutSeconds = jsonInt(ihJson, "timeoutSeconds", c.imageHost.timeoutSeconds);
                 c.imageHost.maxBytes = jsonInt(ihJson, "maxBytes", c.imageHost.maxBytes);
                 c.imageHost.cooldownSeconds = jsonInt(ihJson, "cooldownSeconds", c.imageHost.cooldownSeconds);
+                c.imageHost.relayCacheMinutes = jsonInt(ihJson, "relayCacheMinutes",
+                        c.imageHost.relayCacheMinutes);
                 String ihRoot = jsonString(ihJson, "root");
                 if (!ihRoot.isBlank())
                     c.imageHost.root = ihRoot.trim();
