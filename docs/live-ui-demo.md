@@ -30,6 +30,16 @@ QQ 侧可以收到服务端事件或转发的聊天消息：
 
 ![QQ 表情包的 ChatImage 游戏内预览实测](assets/qq-chatimage-sticker-preview.png)
 
+## QQ 号与游戏 ID 绑定
+
+群友可以在 QQ 里把账号绑到本服游戏 ID。绑定后的主群消息进入 Minecraft 时，公屏会显示群名片和游戏 ID；安装 ChatImage 后，悬停名字前的 `●` 能看到该角色头像。下面是实服截图：QQ 侧头像和群名已打码，仅保留命令、回执和公屏效果。
+
+![QQ 群里绑定游戏 ID](assets/qq-player-bind-qq-command.jpg)
+
+![游戏公屏显示绑定 ID 并悬停预览皮肤头像](assets/qq-player-bind-minecraft-preview.png)
+
+命令、权限和配置见 [QQ 号与游戏 ID 绑定](qq-player-bind-游戏ID绑定.md)。
+
 ## 反控指令集合
 
 `!help` 汇总了普通查询、信息检索、管理操作和需要确认码的高危操作，可以直观看到权限边界。
