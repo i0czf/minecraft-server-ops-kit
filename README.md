@@ -1,290 +1,98 @@
 # Minecraft 腐竹运维工具包
 
-面向 Minecraft Java 服务端服主（腐竹）的便携式运维工具包。
+面向 Minecraft Java 服务端服主的便携式运维工具包：开服、玩家分发、增量更新、QQ 群运维、备份恢复和性能诊断收在一个可迁移目录里。
 
-它把开服、玩家整合包分发、增量更新、QQ 群运维、备份恢复、性能诊断和日常管理收进一个可迁移目录。项目源自 1.21.1 NeoForge 21.1.235 的长期实战，但脚本会优先读取目标服务端的实际版本和加载器，不把某一台服务器的身份配置写死在公版里。
+项目源自 1.21.1 NeoForge 的长期实战，脚本会优先读取目标服务端的实际版本和加载器，不把某一台服的身份写死在公版里。
 
-## 版本与更新日志
+实服截图按引入版本放在 [Releases](https://github.com/i0czf/minecraft-server-ops-kit/releases)，首页只保留说明和入口。
 
-- [查看最新稳定版](https://github.com/i0czf/minecraft-server-ops-kit/releases/latest)
-- [查看全部版本与更新日志](https://github.com/i0czf/minecraft-server-ops-kit/releases)
-- [比较版本差异](https://github.com/i0czf/minecraft-server-ops-kit/compare)
+## 版本
 
-发布页只记录经过验证、对使用者有意义的稳定更新批次；零散开发提交仍保留在 Git 提交历史中。
+- [最新稳定版](https://github.com/i0czf/minecraft-server-ops-kit/releases/latest)
+- [全部发行说明](https://github.com/i0czf/minecraft-server-ops-kit/releases)
+- [版本对比](https://github.com/i0czf/minecraft-server-ops-kit/compare)
+
+发布页只记经过验证、对使用者有意义的批次。
 
 ## 适合谁
 
 - 自己维护 Minecraft Java 服务端的个人服主
-- 需要把整合包、更新源和服务端运维流程标准化的服主
-- 想把“出问题时临时手工排查”变成可复用脚本和报告的人
-- 需要中文一键入口，但不想被某个启动器或某个加载器锁定的人
+- 需要把整合包、更新源和运维流程标准化的人
+- 想把临时手工排查变成可复用脚本和报告的人
+- 需要中文一键入口，但不想被某个启动器或加载器锁定的人
 
 ## 主要能力
 
-### 服务端控制与配置
+**服务端**：中文控制面板（启停、RCON、发布、状态）；可选 Web 面板，默认只听 127.0.0.1、令牌登录、任意 RCON 默认关；初始化向导识别版本 / Forge / NeoForge / Fabric / Quilt；按版本匹配 Java；本机 RCON 自动配置。详见 [Web 面板](docs/web-panel-网页远程运维.md)。
 
-- 中文控制面板：启动、停止、重启、RCON 快捷控制台、更新发布和状态查看
-- 可选 Web 运维面板：默认只监听 `127.0.0.1`，使用本机生成的令牌登录；任意 RCON 控制台默认关闭
-- 初始化向导：自动识别 Minecraft 版本、Forge/NeoForge/Fabric/Quilt、服务端端口和主客户端目录
-- Java 自动匹配：按 Minecraft 版本选择合适的 Java，并在缺少时给出下载指引
-- 本地 RCON 自动配置：生成或轮换密码，敏感值不写入公版模板
-- 公版、精简包和玩家拉新包构建器
+**玩家分发**：规范导入包、PCL 包、完整客户端包和增量更新源；Windows / macOS / Linux 同步；尽量保留玩家按键、服务器列表和资源包；哈希校验、混源回落、客户端自助修复。
 
-#### Web 运维面板（可选）
+**QQ 群**：开服 / 聊天 / 进退服 / 成就 / 崩溃 / 备份通知；群友查询、管理执行；高危确认码和审计；可选 AI 助手。QQ 与游戏 ID 绑定后，公屏显示游戏名，游戏里 @游戏ID 会点到对应 QQ；管理员可用 !转发 立刻停双向聊天，用 !绑定提醒 控制未绑定轻提醒。可选图床 + ChatImage 预览、模组发布事务、DDNS。QQ / LLBot 本体不随仓库分发。详见 [绑定说明](docs/qq-player-bind-游戏ID绑定.md)、[图床说明](docs/qq-image-host-转图床.md)。
 
-无需 IIS、Node、Python 或第三方 CDN，即可在服务端本机启动轻量 Web 运维面板，通过浏览器查看和操作服务器：
-
-- 状态与性能：Minecraft、RCON、更新服务、运维 PID、备份概览，以及 CPU/GPU/内存/磁盘和最近 5 分钟趋势；
-- 服务端控制：启动、重启、停止、仅发布更新、立即备份、健康体检、运行报告、事故复盘和验证备份；
-- 运维与观察：启动/重启/停止运维监控，读取允许的日志末尾，提供在线玩家、TPS、白天、天气和存档等 RCON 快捷操作；
-- 手机端适配：360–390px 窄屏下按钮保持双列触控布局，长文件名、日志、RCON 和访问信息自动换行，页面不再被横向滚动撑开；
-- 安全边界：默认只监听 `127.0.0.1`，首次启动生成随机令牌，任意 RCON 控制台默认关闭；远程访问优先使用 SSH/VPN 隧道。
-
-下面是实际手机端运行截图，展示性能监控、服务端/运维控制、日志与 RCON 三组场景；点击图片可查看原图。
-
-<p align="center">
-  <a href="docs/assets/web-panel-mobile-performance.jpg"><img src="docs/assets/web-panel-mobile-performance.jpg" alt="Web 面板手机端性能监控" width="31%"></a>
-  <a href="docs/assets/web-panel-mobile-control.jpg"><img src="docs/assets/web-panel-mobile-control.jpg" alt="Web 面板手机端服务端和运维控制" width="31%"></a>
-  <a href="docs/assets/web-panel-mobile-logs-rcon.jpg"><img src="docs/assets/web-panel-mobile-logs-rcon.jpg" alt="Web 面板手机端日志与 RCON" width="31%"></a>
-</p>
-<p align="center"><sub>性能监控　·　服务端与运维控制　·　日志、RCON 与访问信息</sub></p>
-
-完整的访问方式、SSH/VPN 隧道、端口映射、令牌轮换和手机端布局说明见 [`docs/web-panel-网页远程运维.md`](docs/web-panel-网页远程运维.md)。
-
-真实运行中的控制面板如下，启动、运维监控、发布/拉新、工具包更新和 RCON 快捷控制台都集中在同一个入口：
-
-![真实服务器运维控制面板](docs/assets/control-panel-overview.png)
-
-### 玩家分发与更新
-
-- 生成规范导入包、PCL 包、完整客户端包和增量更新源
-- Windows、macOS、Linux 玩家同步脚本
-- 首次同步和日常增量同步分开处理，尽量保留玩家自己的按键、服务器列表、资源包和个性化文件
-- 文件哈希校验、混合源回退、客户端自助修复和诊断编号
-- Windows 更新入口强制 CRLF，并避开微软商店假 Python（退出码 9009 回落 PowerShell）；老包闪退可用独立修复小包
-- PCL 本地实例目录识别与启动配置修复
-
-### QQ 群运维
-
-- QQ 群通知：开服、停服、上线、离线、聊天、死亡、成就、崩溃、备份和更新
-- 权限分层：普通群友查询，群主/管理员执行高危操作
-- RCON 命令、备份、存盘、天气、种子、在线列表和 TPS 查询
-- 高危操作确认码、审计记录和重复操作保护
-- 可选 AI 运维助手：读取日志、崩溃报告、模组列表、配置和性能信息，帮助定位问题
-- QQ ↔ 游戏 ID 绑定：成员自助绑定/查询/解绑，管理员代绑与列表，公屏按绑定 ID 显示；头像预览可选
-- 绑定后续：管理员可 `!转发 关/开` 立刻停双向聊天，可 `!绑定提醒 开|关` 控制未绑定轻提醒；游戏里 `@游戏ID` 会在群里点到对应 QQ
-- 可选 DDNS、QQ 图片/表情包自动转存图床并转发到 Minecraft、模组发布事务和摄像机视角能力
-
-#### QQ 图片与表情包的游戏内预览
-
-安装与当前 Minecraft/NeoForge 版本匹配的 ChatImage 客户端 Mod 后，QQ群里的普通图片和表情包会先转存到可被玩家访问的图床，再通过悬停 `CICode` 在 Minecraft 聊天中预览；点击同一个预览项可打开大图，消息标签仍区分为`[图片]`和`[表情包]`。下面是 NeoForge 1.21.1 / 21.1.235 实服的真实效果截图：
-
-![QQ 普通图片的 ChatImage 游戏内预览实测](docs/assets/qq-chatimage-image-preview.png)
-
-![QQ 表情包的 ChatImage 游戏内预览实测](docs/assets/qq-chatimage-sticker-preview.png)
-
-自动转存、手动 `!转图床`、地址分工、ChatImage 悬停预览和故障排查见[QQ 图片转图床说明](docs/qq-image-host-转图床.md)。
-
-#### QQ 游戏 ID 绑定
-
-QQ 桥可以把成员 QQ 号与本服游戏 ID 绑定。普通成员在群里发 `!绑定 游戏ID` 即可自助绑定、查询和解绑，管理员可代绑或查看列表。绑定之后，主群消息转发到 Minecraft 公屏会同时显示群名片和游戏 ID；安装 ChatImage 后，把鼠标放到名字前的 `●` 上还能看到该角色的皮肤头像。
-
-绑定之后还有三件配套能力（公版默认关提醒）：游戏里 `@已绑定ID` 会在主群真 @ 到对应 QQ；没绑的人在主群说话可以轻提一句去绑定；管理员发 `!转发 关` 能立刻停 QQ↔游戏聊天，进退服通知还在。
-
-下面是 NeoForge 1.21.1 / 21.1.235 实服的真实效果。QQ 侧头像和群名已打码，截图只保留能力验证所需的命令与公屏效果：
-
-![QQ 群里绑定游戏 ID](docs/assets/qq-player-bind-qq-command.jpg)
-
-![游戏公屏显示绑定 ID 并悬停预览皮肤头像](docs/assets/qq-player-bind-minecraft-preview.png)
-
-命令、权限、配置和离线自测见[QQ 号与游戏 ID 绑定](docs/qq-player-bind-游戏ID绑定.md)。
-
-QQ 与 Minecraft 的实际双向消息链路如下：
-
-![QQ 群消息桥接](docs/assets/qq-server-sync.png)
-
-![Minecraft 游戏内消息桥接](docs/assets/minecraft-chat-sync.png)
-
-#### 反控指令集合
-
-`!help` 汇总了普通查询、信息检索、管理操作和需要确认码的高危操作，可以直观看到权限边界：
-
-![QQ 反控指令集合](docs/assets/qq-command-catalog.png)
-
-#### QQ 反控查询
-
-`!list`、`!tps` 等无破坏查询可以从 QQ 发起，并由机器人返回在线玩家和性能信息；高危操作仍受权限和确认流程约束。
-
-![QQ RCON 查询实际示例](docs/assets/qq-rcon-commands.png)
-
-#### AI 运维助手
-
-在群内 @ 机器人并描述服务器异常后，AI 助手可以结合看门狗/崩溃报告给出故障类型、卡顿位置、关联模组和排查建议。
-
-![QQ AI 运维助手实际示例](docs/assets/qq-ai-ops-assistant.png)
-
-QQ/LLBot 程序本体和 QQ 客户端不随源码仓库分发。需要 QQ 机器人时，在目标机器按文档自行安装，并在本机配置登录信息。
-
-### 真实界面演示
-
-首页已在对应能力段落中嵌入关键截图；完整的截图说明、脱敏范围和实际交互边界见[真实界面演示](docs/live-ui-demo.md)。展示图只保留能力验证所需内容，本机路径、端口/PID、地址和凭据已脱敏；反控指令集合图保留了示例角色标签、昵称和头像，用于说明权限分层。
-
-### 备份与故障诊断
-
-- 定时备份、手动备份、混合压缩和保留策略
-- 备份可验证：检查 ZIP、`level.dat`、区域文件、玩家档和可选深度抽样
-- 备份恢复冒烟测试和影子服试车间
-- 卡顿取证、MSPT/TPS 黑匣子、线程转储和错误指纹告警
-- 事故自动复盘、运维时间线和周期运行报告
-- BlueMap 时光机：只刷新快照元数据，不复制线上瓦片
-- 扫地僧实体清理、配方索引、要素物品反查等可选工具
-
-高风险功能在公版模板中默认关闭，需要服主明确配置后才会启用。
+**备份与诊断**：定时 / 手动备份、ZIP 校验、恢复冒烟、影子服试车、卡顿取证、错误指纹、事故复盘、运维时间线、BlueMap 时光机。扫地僧、配方和要素查询等可选。高风险能力在公版模板里默认关闭。
 
 ## 快速开始
 
-### 1. 获取源码或公版压缩包
+1. 把仓库放到服务端根目录，或用构建器生成 dist/ 下的公版包再解压。新服可以还没有 server.properties。
+2. 运行 一键脚本\一键便携-初始化配置.bat。第一次建议逐项确认。结果写入本机私有文件 	ools\portable-pack.json 和 	ools\ops-config.json，不要提交或外发。
+3. 需要浏览器运维时运行 一键脚本\一键便携-启动Web控制面板.bat。首次会生成 	mp\portable-web-panel.token，默认地址 http://127.0.0.1:58080/。远程优先走 SSH / VPN。
+4. 启动服务端：一键脚本\一键便携-启动服务端.bat。日常启停、运维监控和 RCON 也可走根目录控制面板。
+5. 发布玩家更新：确认主客户端和更新源后，运行 一键脚本\一键便携-生成规范导入包.bat 和 一键脚本\一键便携-开启更新服务.bat。公网更新必须用你自己授权的域名、端口和访问策略。
 
-将仓库内容放到 Minecraft 服务端根目录，或使用构建器生成 `dist/` 下的公版压缩包，再解压到服务端根目录。
+完整手册：[docs/portable-server-kit.md](docs/portable-server-kit.md)。
 
-工具包不要求服务端已经存在 `server.properties`；新服可以先解压，再运行初始化向导。
+## 目录
 
-### 2. 初始化配置
-
-在服务端根目录运行：
-
-```text
-一键脚本\一键便携-初始化配置.bat
-```
-
-第一次使用建议选择逐项确认。向导会检测目标服务端的版本、加载器、端口、世界名和主客户端目录，并把结果写入本机配置文件：
-
-```text
-tools\portable-pack.json
-tools\ops-config.json
-```
-
-这两份文件是本机私有配置，不应提交到 Git 或发给别人。
-
-### 3. 可选启动 Web 运维面板
-
-在服务端根目录运行：
-
-```text
-一键脚本\一键便携-启动Web控制面板.bat
-```
-
-首次启动会在 `tmp\portable-web-panel.token` 生成随机令牌，默认访问地址为 `http://127.0.0.1:58080/`。远程访问优先使用 SSH/VPN 隧道；如需停止面板，运行：
-
-```text
-一键脚本\一键便携-停止Web控制面板.bat
-```
-
-Web 面板的公版配置模板是 `tools\portable-web-panel.example.json`。需要开启任意 RCON 命令时，必须在本机生成的 `tools\portable-web-panel.json` 中显式设置 `allowConsoleCommands`，不要把该运行时配置提交或分享。
-
-### 4. 启动服务端
-
-```text
-一键脚本\一键便携-启动服务端.bat
-```
-
-日常启动、重启运维监控、停止运维监控和控制台操作都可以从根目录控制面板完成。
-
-### 5. 发布玩家更新
-
-确认主客户端目录和更新源配置后运行：
-
-```text
-一键脚本\一键便携-生成规范导入包.bat
-一键脚本\一键便携-开启更新服务.bat
-```
-
-玩家端按文档中的同步入口执行即可。公网更新服务必须使用你自己明确授权的域名、端口和访问策略。
-
-## 目录结构
-
-```text
+`	ext
 .
-├─ 一键便携-控制面板.bat       # 根目录唯一的控制面板入口
-├─ 一键脚本/                   # 可单独双击的一键入口
-├─ tools/                      # PowerShell、Python、Java 和 Node 工具
-│  ├─ portable-pack.example.json
-│  ├─ portable-ops-config.example.json
-│  └─ ...
-├─ docs/                       # 功能说明、排障手册和设计文档
-├─ PUBLIC-RELEASE-AUDIT.md     # 公版边界和发布审计说明
-└─ .gitignore                  # 私有配置和运行目录保护规则
-```
+├─ 一键便携-控制面板.bat     根目录唯一的控制面板入口
+├─ 一键脚本/                 可单独双击的一键入口
+├─ tools/                    脚本与公版模板（*.example.json）
+├─ docs/                     功能说明；截图原件在 docs/assets/
+├─ PUBLIC-RELEASE-AUDIT.md   公版纳入 / 排除边界
+└─ .gitignore                私有配置和运行目录保护
+`
 
-详细运维手册见 [`docs/portable-server-kit.md`](docs/portable-server-kit.md)。
+## 构建公版
 
-## 构建和验证公版
-
-在仓库根目录运行公版构建器：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\tools\build-portable-server-kit.ps1 `
+`powershell
+powershell -NoProfile -ExecutionPolicy Bypass 
+  -File .\tools\build-portable-server-kit.ps1 
   -Version 20260816-public
-```
+`
 
-构建器会执行：
+构建器会做白名单、私有文件门禁、路径 / 密钥扫描、脚本编码和语法检查。产物在 dist/，默认不进 Git。
 
-- 公版文件白名单检查
-- 私有配置和运行目录门禁
-- 绝对用户路径和疑似密钥扫描
-- PowerShell 编码与语法检查
-- Windows `.bat` 换行和 BOM 检查
-- 初始化菜单、QQ 桥、备份、更新和近期功能标记检查
-
-生成物位于 `dist/`，该目录默认被 `.gitignore` 排除，不会进入源码提交。
-
-可选的本地语法检查：
-
-```powershell
+`powershell
 python -m compileall -q .\tools
-
 New-Item -ItemType Directory -Force .\tmp\javac-check | Out-Null
-javac --add-modules jdk.httpserver -encoding UTF-8 `
+javac --add-modules jdk.httpserver -encoding UTF-8 
   -d .\tmp\javac-check .\tools\QQConsoleBridge.java
-```
+`
 
-## 公版隐私边界
+## 隐私与安全
 
-本仓库只包含通用源码、模板、脚本和文档，明确不包含：
+仓库只收通用源码、模板和文档，不含：
 
-- 真实 Discord/QQ/AI/DDNS/API token、Webhook、密码和群号
-- `tools/portable-pack.json`、`tools/ops-config.json` 等本机配置
-- RCON 密码、更新服务 token 和本机绝对路径
-- 世界、日志、备份、崩溃报告、玩家缓存、OP/白名单/封禁名单
-- 私服客户端、模组、地图、存档和服务端运行时目录
-- QQ 登录数据、登录二维码、QQ 客户端和第三方运行时数据
+- 真实 Token、Webhook、密码、群号、域名
+- 本机 ops-config.json / portable-pack.json、RCON 密码、更新令牌
+- 世界、日志、备份、崩溃报告、玩家缓存、白名单
+- 私服客户端、模组、地图、QQ 登录数据和第三方运行时
 
-如果要提交问题报告，请先删除配置文件、日志中的域名/IP、玩家名、UUID、群号和 token。不要直接上传整个运行中的服务端目录。
+报 Issue 前先删配置和日志里的域名、IP、玩家名、UUID、群号和密钥。不要整包上传运行中的服务端。
 
-## 安全建议
-
-- 真实密钥优先使用环境变量或本机私有配置，不要写入脚本和模板
-- RCON 只监听本机，并使用随机强密码
-- 生产服操作前先备份，恢复前先做验证或影子服试车
-- 不要以管理员身份运行一键入口，除非你明确知道自己在做什么
-- 开启 AI、DDNS、图片上传、模组自动发布等功能前，先阅读对应文档并限制权限
-- 公版构建前检查 `git status`，确认没有私有文件被加入暂存区
+日常建议：密钥放环境变量或本机私有配置；RCON 只听本机并用随机强密码；生产操作先备份，恢复前先验证或影子服试车；不要用管理员身份跑一键入口，除非你清楚在做什么。
 
 ## 贡献
 
-欢迎提交 Issue、文档改进和 Pull Request。
+欢迎 Issue、文档改进和 Pull Request。提交前请确认：
 
-提交前请确认：
+1. 不含服务器身份、玩家信息或凭据。
+2. 新功能在公版模板里默认安全关闭，或写明风险。
+3. PowerShell 用 UTF-8；Windows .bat 保持 CRLF、不带 BOM。
+4. 跑过公版构建器和相关语法检查。
+5. 写明测试环境、Minecraft 版本和加载器。
 
-1. 不包含任何服务器身份信息、玩家信息或凭据。
-2. 新增功能在公版模板中默认安全关闭，或明确说明风险。
-3. PowerShell 脚本保存为 UTF-8，Windows `.bat` 保持 CRLF 且不带 BOM。
-4. 运行公版构建器和相关语法检查。
-5. 说明测试环境、Minecraft 版本和加载器版本。
+## 许可证
 
-## 许可证与第三方组件
-
-本项目原创代码采用 [PolyForm Noncommercial License 1.0.0](LICENSE)，版权所有 © 2026 i0czf。该许可证允许非商业目的下载、使用、修改和再分发；商业使用需要事先获得版权方书面许可。
-
-许可证仅适用于本项目原创代码。仓库中的第三方依赖、QQ/LLBot、Minecraft 模组和启动器不等同于本项目代码，使用和再分发时请遵守各自许可证及服务条款。
+原创代码采用 [PolyForm Noncommercial License 1.0.0](LICENSE)，© 2026 i0czf。允许非商业使用、修改和再分发；商业使用需事先书面许可。第三方依赖、QQ / LLBot、Minecraft 模组和启动器遵守各自许可证。

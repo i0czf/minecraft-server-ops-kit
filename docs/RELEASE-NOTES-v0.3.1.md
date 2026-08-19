@@ -38,7 +38,7 @@
 
 改 QQ 桥只热重载；动到 `discord-watch.ps1` 再热更运维监控。不要冷启动 Minecraft。
 
-功能说明：[QQ 号与游戏 ID 绑定](https://github.com/i0czf/minecraft-server-ops-kit/blob/main/docs/qq-player-bind-%E6%B8%B8%E6%88%8FID%E7%BB%91%E5%AE%9A.md)
+功能说明：[QQ 号与游戏 ID 绑定](https://github.com/i0czf/minecraft-server-ops-kit/blob/main/docs/qq-player-bind-%E6%B8%B8%E6%88%8FID%E7%BB%91%E5%AE%9A.md)。绑定本体截图见 [v0.3.0](https://github.com/i0czf/minecraft-server-ops-kit/releases/tag/v0.3.0)。
 
 ## 验证
 
