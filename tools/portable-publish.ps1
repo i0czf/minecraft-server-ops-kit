@@ -478,6 +478,8 @@ Copy-ToolFile -SourceName 'player-update-generic.py' -DestinationName 'player-up
 Copy-ToolFile -SourceName 'portable-stage-daemon.ps1' -DestinationName 'portable-stage-daemon.ps1' -DestinationRoot $updaterRoot
 Copy-ToolFile -SourceName 'portable-stage-daemon.py' -DestinationName 'portable-stage-daemon.py' -DestinationRoot $updaterRoot
 Copy-ToolFile -SourceName 'portable-bootstrap-refresh.ps1' -DestinationName 'portable-bootstrap-refresh.ps1' -DestinationRoot $updaterRoot
+Copy-ToolFile -SourceName 'portable-windows-repair.ps1' -DestinationName 'portable-windows-repair.ps1' -DestinationRoot $updaterRoot
+Copy-ToolFile -SourceName 'portable-windows-repair.bat' -DestinationName 'portable-windows-repair.bat' -DestinationRoot $updaterRoot
 Copy-ToolFile -SourceName 'portable-windows-sync.bat' -DestinationName 'Windows-sync.bat' -DestinationRoot $updaterRoot
 Copy-ToolFile -SourceName 'portable-windows-sync.bat' -DestinationName '更新mod-Windows端.bat' -DestinationRoot $publishDir
 Copy-ToolFile -SourceName 'portable-macos-sync.command' -DestinationName 'macOS-sync.command' -DestinationRoot $updaterRoot
