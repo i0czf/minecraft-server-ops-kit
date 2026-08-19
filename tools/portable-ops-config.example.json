@@ -207,11 +207,13 @@
                  "wsPort":  3002,
                  "commandPrefix":  "!",
                  "playerBind":  {
-                                    "_说明":  "QQ号与游戏ID绑定。公版模板默认关闭；打开后群友可自助绑定/查询/解绑，管理员可代绑和查看列表。requireSeenOnServer=true 时必须先进过服；showSkinHead=true 时复用已有皮肤/图床链路，图床不可用时仍显示文字。绑定数据写入 logs/，不要提交运行时数据。",
+                                    "_说明":  "QQ号与游戏ID绑定。公版模板默认关闭；打开后群友可自助绑定/查询/解绑，管理员可代绑和查看列表。requireSeenOnServer=true 时必须先进过服；showSkinHead=true 时复用已有皮肤/图床链路。remindUnbound 会在主群对没绑的人轻提一句，主群不全是玩家时建议保持 false；也可在群里 !绑定提醒 开|关，开关落在 logs/qq-bind-remind.json。绑定数据写入 logs/，不要提交运行时数据。",
                                     "enabled":  false,
                                     "memberAccess":  true,
                                     "requireSeenOnServer":  true,
                                     "showSkinHead":  true,
+                                    "remindUnbound":  false,
+                                    "remindCooldownMinutes":  360,
                                     "maxPerQq":  1,
                                     "namePattern":  "^[A-Za-z0-9_]{1,16}$",
                                     "store":  "logs/qq-player-binds.json"

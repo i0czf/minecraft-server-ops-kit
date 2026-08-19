@@ -114,6 +114,27 @@ public class QQConsoleBridge {
     private final java.util.Map<String, PlayerBind> playerBindsByQq = new ConcurrentHashMap<>();
     private final java.util.Map<String, PlayerBind> playerBindsByName = new ConcurrentHashMap<>();
     private final java.util.Map<String, String> playerHeadUrlCache = new ConcurrentHashMap<>();
+    // 未绑定提醒冷却只记内存，热重载会丢；最近主群发言给 !未绑定 用。
+    private final java.util.Map<String, Long> unboundRemindAt = new ConcurrentHashMap<>();
+    private final java.util.Map<String, RecentQqSpeaker> recentMainSpeakers = new ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicInteger unboundRemindCount =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.ScheduledExecutorService unboundRemindExecutor =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(task -> {
+                Thread thread = new Thread(task, "qq-bind-remind");
+                thread.setDaemon(true);
+                return thread;
+            });
+    // QQ↔游戏聊天转发开关，落盘 logs/qq-chat-relay.json，热重载后仍在。
+    private final Object chatRelayLock = new Object();
+    private volatile boolean chatRelayEnabled = true;
+    private volatile long chatRelayUpdatedAt = 0L;
+    private volatile String chatRelayUpdatedBy = "";
+    // 绑定提醒开关可被 !绑定提醒 开|关 改，落盘 logs/qq-bind-remind.json。
+    private final Object remindUnboundLock = new Object();
+    private volatile boolean remindUnboundEnabled = true;
+    private volatile long remindUnboundUpdatedAt = 0L;
+    private volatile String remindUnboundUpdatedBy = "";
     private volatile long usercacheLoadedAt = 0L;
     private volatile List<CachedPlayer> usercacheSnapshot = List.of();
     // 滚动群聊缓冲（记录谁说了什么），供 AI 通过 read_recent_chat 了解群里聊了啥。
@@ -276,6 +297,8 @@ public class QQConsoleBridge {
         this.root = root;
         this.config = config;
         loadPlayerBinds();
+        loadChatRelayState();
+        loadRemindUnboundState();
     }
 
     void run() throws Exception {
@@ -330,13 +353,6 @@ public class QQConsoleBridge {
         t.start();
     }
 
-    static boolean isOfficialDeepSeekPricingUri(URI uri) {
-        if (uri == null || !"https".equalsIgnoreCase(uri.getScheme())
-                || !"api-docs.deepseek.com".equalsIgnoreCase(uri.getHost()))
-            return false;
-        return uri.getUserInfo() == null && uri.getPort() <= 0;
-    }
-
     void refreshDeepSeekPricing(boolean startup) {
         if (!config.ai.officialPricingEnabled)
             return;
@@ -344,8 +360,10 @@ public class QQConsoleBridge {
                 ? "" : config.ai.officialPricingUrl.trim();
         try {
             URI uri = URI.create(source);
-            if (!isOfficialDeepSeekPricingUri(uri))
+            if (!"https".equalsIgnoreCase(uri.getScheme())
+                    || !"api-docs.deepseek.com".equalsIgnoreCase(uri.getHost())) {
                 throw new IOException("官方价目 URL 必须是 https://api-docs.deepseek.com");
+            }
             int timeout = Math.max(3, Math.min(30, config.ai.officialPricingTimeoutSeconds));
             HttpClient client = HttpClient.newBuilder()
                     .connectTimeout(java.time.Duration.ofSeconds(timeout))
@@ -363,8 +381,8 @@ public class QQConsoleBridge {
             URI finalUri = response.uri();
             if (response.statusCode() != 200)
                 throw new IOException("官方价目 HTTP " + response.statusCode());
-            if (!isOfficialDeepSeekPricingUri(finalUri))
-                throw new IOException("官方价目发生了非官方 HTTPS 域名跳转");
+            if (finalUri == null || !"api-docs.deepseek.com".equalsIgnoreCase(finalUri.getHost()))
+                throw new IOException("官方价目发生了非官方域名跳转");
 
             DeepSeekPriceSnapshot snapshot = parseDeepSeekPricePage(response.body(), source);
             int applied = 0;
@@ -392,13 +410,11 @@ public class QQConsoleBridge {
                 .replaceAll("(?is)<style\\b[^>]*>.*?</style>", " ")
                 .replaceAll("<[^>]+>", " ")
                 .replace("&nbsp;", " ")
-                .replace("&#160;", " ")
                 .replace("&#39;", "'")
                 .replace("&#x27;", "'")
                 .replace("&amp;", "&")
                 .replaceAll("\\s+", " ").trim();
-        String lowerText = text.toLowerCase(java.util.Locale.ROOT);
-        if (!lowerText.contains("deepseek-v4-flash") || !lowerText.contains("deepseek-v4-pro"))
+        if (!text.contains("deepseek-v4-flash") || !text.contains("deepseek-v4-pro"))
             throw new IOException("官方价目页面未找到 V4 Flash/Pro 模型名");
 
         DeepSeekPriceRow cacheHit = parseDeepSeekPriceRow(text,
@@ -542,6 +558,8 @@ public class QQConsoleBridge {
                     + "，guestReadOnly=" + config.guestReadOnly
                     + "，playerBind=" + config.playerBind.enabled
                     + "，playerBinds=" + playerBindsByQq.size()
+                    + "，remindUnbound=" + remindUnboundEnabled
+                    + "，chatRelay=" + chatRelayEnabled
                     + "，wsPort=" + config.wsPort);
             if (config.modReleaseEnabled) {
                 log("模组升级权限已加载：sourceGroups=" + config.modReleaseGroupIds
@@ -1227,7 +1245,10 @@ public class QQConsoleBridge {
             List<QQMessageSegment> segments = messageSegments(msg);
             if (segments.isEmpty())
                 return;
-            enqueueRelayQQChat(msg, displayName, segments);
+            noteMainGroupSpeaker(msg, displayName);
+            if (isChatRelayEnabled())
+                enqueueRelayQQChat(msg, displayName, segments);
+            maybeRemindUnbound(msg, displayName);
             return;
         }
 
@@ -1238,7 +1259,7 @@ public class QQConsoleBridge {
         log("收到命令：sender=" + displayName + "(" + msg.senderId + ") role=" + msg.role
                 + " privileged=" + privileged + " command=" + truncate(maskCommand(command), 160));
 
-        // !ask / !诊断 / !问 <问题> → AI 运维智能体；单独 !ai 只查状态不调模型
+            // !ask / !诊断 / !问 <问题> → AI 运维智能体；单独 !ai 只查状态不调模型
         String aiQ = extractAiQuestion(command);
         if (aiQ != null) {
             if (aiQ.isBlank() && command.trim().equalsIgnoreCase("ai")) {
@@ -1295,6 +1316,14 @@ public class QQConsoleBridge {
         }
         if (isPlayerBindCommand(word)) {
             handlePlayerBindCommand(msg, displayName, command, privileged);
+            return;
+        }
+        if (isChatRelayCommand(word)) {
+            handleChatRelayCommand(msg, displayName, command, privileged);
+            return;
+        }
+        if (isUnboundRemindCommand(word)) {
+            handleUnboundRemindCommand(msg, displayName, command, privileged);
             return;
         }
         if (command.equalsIgnoreCase("list")) {
@@ -2190,6 +2219,16 @@ public class QQConsoleBridge {
                 || word.equals("绑定列表") || word.equalsIgnoreCase("bindlist");
     }
 
+    static boolean isChatRelayCommand(String word) {
+        return word != null && (word.equals("转发") || word.equalsIgnoreCase("relay")
+                || word.equalsIgnoreCase("forward"));
+    }
+
+    static boolean isUnboundRemindCommand(String word) {
+        return word != null && (word.equals("绑定提醒") || word.equals("未绑定")
+                || word.equalsIgnoreCase("unbindremind") || word.equalsIgnoreCase("unbound"));
+    }
+
     String formatWhoami(QQMessage msg, String displayName) {
         String who = displayName == null || displayName.isBlank() ? "你" : displayName;
         String qq = msg == null ? "" : String.valueOf(msg.senderId);
@@ -2338,6 +2377,336 @@ public class QQConsoleBridge {
             out.append("\n").append(n).append(". ").append(bind.name).append(" ↔ ").append(bind.qq);
         }
         sendGroupMsg(out.toString());
+    }
+
+    void handleChatRelayCommand(QQMessage msg, String displayName, String command, boolean privileged)
+            throws Exception {
+        String rest = command.substring(firstWord(command).length()).trim()
+                .toLowerCase(java.util.Locale.ROOT);
+        if (rest.isBlank() || rest.equals("状态") || rest.equals("status")) {
+            sendGroupMsg("[转发] 当前 QQ↔游戏聊天：" + (isChatRelayEnabled() ? "开" : "关"));
+            return;
+        }
+        boolean turnOn = rest.equals("开") || rest.equals("开启") || rest.equals("on")
+                || rest.equals("enable") || rest.equals("打开");
+        boolean turnOff = rest.equals("关") || rest.equals("关闭") || rest.equals("off")
+                || rest.equals("disable") || rest.equals("关掉");
+        if (!turnOn && !turnOff) {
+            sendGroupMsg("[转发] 用法：" + config.prefix + "转发 开|关");
+            return;
+        }
+        if (!privileged) {
+            sendGroupMsg("[转发] 改开关需要管理员。当前：" + (isChatRelayEnabled() ? "开" : "关"));
+            return;
+        }
+        if (turnOn == isChatRelayEnabled()) {
+            sendGroupMsg("[转发] 已经是" + (turnOn ? "开" : "关") + "着。");
+            return;
+        }
+        String who = displayName == null || displayName.isBlank() ? "管理员" : displayName.trim();
+        if (!saveChatRelayState(turnOn, who)) {
+            sendGroupMsg("[转发] 写入失败，请稍后再试。");
+            return;
+        }
+        if (turnOff)
+            sendGroupMsg("[转发] 已关闭 QQ↔游戏聊天。进退服通知还在。恢复发 "
+                    + config.prefix + "转发 开");
+        else
+            sendGroupMsg("[转发] 已开启 QQ↔游戏聊天。");
+    }
+
+    void handleUnboundRemindCommand(QQMessage msg, String displayName, String command, boolean privileged)
+            throws Exception {
+        String word = firstWord(command);
+        String rest = command.substring(word.length()).trim();
+        String restLower = rest.toLowerCase(java.util.Locale.ROOT);
+        boolean turnOn = restLower.equals("开") || restLower.equals("开启") || restLower.equals("on")
+                || restLower.equals("enable") || restLower.equals("打开");
+        boolean turnOff = restLower.equals("关") || restLower.equals("关闭") || restLower.equals("off")
+                || restLower.equals("disable") || restLower.equals("关掉");
+        if (turnOn || turnOff) {
+            if (!privileged) {
+                sendGroupMsg("[绑定提醒] 改开关需要管理员。当前：" + (isRemindUnboundEnabled() ? "开" : "关"));
+                return;
+            }
+            if (turnOn == isRemindUnboundEnabled()) {
+                sendGroupMsg("[绑定提醒] 已经是" + (turnOn ? "开" : "关") + "着。");
+                return;
+            }
+            String who = displayName == null || displayName.isBlank() ? "管理员" : displayName.trim();
+            if (!saveRemindUnboundState(turnOn, who)) {
+                sendGroupMsg("[绑定提醒] 写入失败，请稍后再试。");
+                return;
+            }
+            if (turnOff)
+                sendGroupMsg("[绑定提醒] 已关闭。没绑的人在群里说话不再提醒。恢复发 "
+                        + config.prefix + "绑定提醒 开");
+            else
+                sendGroupMsg("[绑定提醒] 已开启。没绑的人在主群说话会轻提一句去绑定。");
+            return;
+        }
+        boolean check = word.equals("未绑定") || word.equalsIgnoreCase("unbound")
+                || restLower.equals("检查") || restLower.equals("check")
+                || restLower.equals("列表") || restLower.equals("list");
+        if (!check) {
+            sendGroupMsg(formatUnboundRemindStatus());
+            return;
+        }
+        if (!privileged) {
+            sendGroupMsg("[绑定提醒] 查看未绑定名单需要管理员。");
+            return;
+        }
+        sendGroupMsg(formatUnboundRecentList(true));
+    }
+
+    String formatUnboundRemindStatus() {
+        boolean on = config.playerBind.enabled && isRemindUnboundEnabled();
+        return "[绑定提醒] 开关：" + (on ? "开" : "关")
+                + "  冷却：" + Math.max(1, config.playerBind.remindCooldownMinutes) + " 分钟"
+                + "\n本进程已提醒 " + unboundRemindCount.get() + " 人"
+                + "\n开关发 " + config.prefix + "绑定提醒 开|关"
+                + "\n查最近没绑的人发 " + config.prefix + "未绑定";
+    }
+
+    String formatUnboundRecentList(boolean showQq) {
+        List<RecentQqSpeaker> speakers = new ArrayList<>();
+        for (RecentQqSpeaker speaker : recentMainSpeakers.values()) {
+            if (speaker == null || speaker.qq == null || speaker.qq.isBlank())
+                continue;
+            if (findBindByQq(speaker.qq) != null)
+                continue;
+            speakers.add(speaker);
+        }
+        speakers.sort((a, b) -> Long.compare(b.lastSpeakAt, a.lastSpeakAt));
+        if (speakers.isEmpty())
+            return "[绑定提醒] 最近主群说话的人都已绑定，或还没人说过话。";
+        StringBuilder out = new StringBuilder("[绑定提醒] 最近说过话、还没绑定：");
+        int n = 0;
+        for (RecentQqSpeaker speaker : speakers) {
+            if (n++ >= 20) {
+                out.append("\n…其余 ").append(speakers.size() - 20).append(" 人略");
+                break;
+            }
+            String card = speaker.card == null || speaker.card.isBlank() ? "（无名片）" : speaker.card;
+            out.append("\n").append(n).append(". ").append(card);
+            if (showQq)
+                out.append("  QQ ").append(speaker.qq);
+        }
+        return out.toString();
+    }
+
+    void noteMainGroupSpeaker(QQMessage msg, String displayName) {
+        if (msg == null)
+            return;
+        if (selfId > 0 && msg.senderId == selfId)
+            return;
+        String qq = String.valueOf(msg.senderId);
+        if (qq.isBlank() || "0".equals(qq))
+            return;
+        String card = displayName == null ? "" : displayName.trim();
+        recentMainSpeakers.put(qq, new RecentQqSpeaker(qq, card, System.currentTimeMillis()));
+        if (recentMainSpeakers.size() > 256)
+            pruneRecentSpeakers();
+    }
+
+    void pruneRecentSpeakers() {
+        long cutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000;
+        recentMainSpeakers.entrySet().removeIf(e -> e.getValue() == null || e.getValue().lastSpeakAt < cutoff);
+        if (recentMainSpeakers.size() <= 256)
+            return;
+        List<Map.Entry<String, RecentQqSpeaker>> all = new ArrayList<>(recentMainSpeakers.entrySet());
+        all.sort((a, b) -> Long.compare(a.getValue().lastSpeakAt, b.getValue().lastSpeakAt));
+        int drop = recentMainSpeakers.size() - 200;
+        for (int i = 0; i < drop && i < all.size(); i++)
+            recentMainSpeakers.remove(all.get(i).getKey());
+    }
+
+    void maybeRemindUnbound(QQMessage msg, String displayName) {
+        if (msg == null || !config.playerBind.enabled || !isRemindUnboundEnabled())
+            return;
+        if (selfId > 0 && msg.senderId == selfId)
+            return;
+        if (!config.isMainGroup(msg.group))
+            return;
+        String qq = String.valueOf(msg.senderId);
+        if (!shouldRemindUnbound(true, true, false, true, findBindByQq(qq) != null,
+                unboundRemindAt.get(qq), System.currentTimeMillis(),
+                Math.max(1, config.playerBind.remindCooldownMinutes) * 60_000L))
+            return;
+        unboundRemindAt.put(qq, System.currentTimeMillis());
+        String group = msg.group;
+        unboundRemindExecutor.schedule(() -> {
+            try {
+                if (findBindByQq(qq) != null)
+                    return;
+                sendGroupMsgSafe(group, "还没绑定游戏ID。在主群发 "
+                        + config.prefix + "绑定 你的游戏ID，游戏里就能显示角色名。");
+                unboundRemindCount.incrementAndGet();
+            } catch (Exception ex) {
+                log("未绑定提醒失败：" + messageOf(ex));
+            }
+        }, 5, java.util.concurrent.TimeUnit.SECONDS);
+    }
+
+    static boolean shouldRemindUnbound(boolean bindEnabled, boolean remindEnabled, boolean isSelf,
+            boolean isMainGroup, boolean isBound, Long lastRemindAt, long now, long cooldownMs) {
+        if (!bindEnabled || !remindEnabled || isSelf || !isMainGroup || isBound)
+            return false;
+        return lastRemindAt == null || now - lastRemindAt >= cooldownMs;
+    }
+
+    boolean isChatRelayEnabled() {
+        return chatRelayEnabled;
+    }
+
+    boolean isRemindUnboundEnabled() {
+        return remindUnboundEnabled;
+    }
+
+    void loadRemindUnboundState() {
+        remindUnboundEnabled = config.playerBind.remindUnbound;
+        Path file = remindUnboundStorePath();
+        if (!Files.isRegularFile(file))
+            return;
+        try {
+            String raw = Files.readString(file, StandardCharsets.UTF_8);
+            ChatRelayState state = parseRemindUnboundState(raw);
+            if (state == null)
+                return;
+            remindUnboundEnabled = state.enabled;
+            remindUnboundUpdatedAt = state.updatedAt;
+            remindUnboundUpdatedBy = state.updatedBy;
+            log("已加载绑定提醒开关：" + (remindUnboundEnabled ? "开" : "关"));
+        } catch (Exception ex) {
+            log("读取绑定提醒开关失败，按配置处理：" + messageOf(ex));
+        }
+    }
+
+    boolean saveRemindUnboundState(boolean enabled, String updatedBy) {
+        synchronized (remindUnboundLock) {
+            remindUnboundEnabled = enabled;
+            remindUnboundUpdatedAt = System.currentTimeMillis();
+            remindUnboundUpdatedBy = updatedBy == null ? "" : updatedBy.trim();
+            Path file = remindUnboundStorePath();
+            try {
+                Files.createDirectories(file.getParent());
+                Path tmp = file.resolveSibling(file.getFileName().toString() + ".tmp");
+                Files.writeString(tmp, serializeRemindUnboundState(remindUnboundEnabled,
+                        remindUnboundUpdatedAt, remindUnboundUpdatedBy), StandardCharsets.UTF_8);
+                try {
+                    Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING,
+                            StandardCopyOption.ATOMIC_MOVE);
+                } catch (IOException ex) {
+                    Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+                }
+                return true;
+            } catch (Exception ex) {
+                log("写入绑定提醒开关失败：" + messageOf(ex));
+                return false;
+            }
+        }
+    }
+
+    Path remindUnboundStorePath() {
+        return root.resolve("logs").resolve("qq-bind-remind.json");
+    }
+
+    static ChatRelayState parseRemindUnboundState(String raw) {
+        if (raw == null || raw.isBlank() || !raw.contains("\"remindUnbound\""))
+            return null;
+        return new ChatRelayState(jsonBoolean(raw, "remindUnbound"),
+                jsonLong(raw, "updatedAt", 0L), jsonString(raw, "updatedBy"));
+    }
+
+    static String serializeRemindUnboundState(boolean enabled, long updatedAt, String updatedBy) {
+        return "{\n  \"remindUnbound\": " + enabled
+                + ",\n  \"updatedAt\": " + updatedAt
+                + ",\n  \"updatedBy\": \"" + jsonEscape(updatedBy == null ? "" : updatedBy) + "\"\n}\n";
+    }
+
+    void loadChatRelayState() {
+        Path file = chatRelayStorePath();
+        if (!Files.isRegularFile(file))
+            return;
+        try {
+            String raw = Files.readString(file, StandardCharsets.UTF_8);
+            ChatRelayState state = parseChatRelayState(raw);
+            if (state == null)
+                return;
+            chatRelayEnabled = state.enabled;
+            chatRelayUpdatedAt = state.updatedAt;
+            chatRelayUpdatedBy = state.updatedBy;
+            log("已加载聊天转发开关：" + (chatRelayEnabled ? "开" : "关"));
+        } catch (Exception ex) {
+            log("读取聊天转发开关失败，按开启处理：" + messageOf(ex));
+            chatRelayEnabled = true;
+        }
+    }
+
+    boolean saveChatRelayState(boolean enabled, String updatedBy) {
+        synchronized (chatRelayLock) {
+            chatRelayEnabled = enabled;
+            chatRelayUpdatedAt = System.currentTimeMillis();
+            chatRelayUpdatedBy = updatedBy == null ? "" : updatedBy.trim();
+            Path file = chatRelayStorePath();
+            try {
+                Files.createDirectories(file.getParent());
+                Path tmp = file.resolveSibling(file.getFileName().toString() + ".tmp");
+                Files.writeString(tmp, serializeChatRelayState(chatRelayEnabled, chatRelayUpdatedAt,
+                        chatRelayUpdatedBy), StandardCharsets.UTF_8);
+                try {
+                    Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING,
+                            StandardCopyOption.ATOMIC_MOVE);
+                } catch (IOException ex) {
+                    Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+                }
+                return true;
+            } catch (Exception ex) {
+                log("写入聊天转发开关失败：" + messageOf(ex));
+                return false;
+            }
+        }
+    }
+
+    Path chatRelayStorePath() {
+        return root.resolve("logs").resolve("qq-chat-relay.json");
+    }
+
+    static ChatRelayState parseChatRelayState(String raw) {
+        if (raw == null || raw.isBlank() || !raw.contains("\"chatRelay\""))
+            return null;
+        return new ChatRelayState(jsonBoolean(raw, "chatRelay"),
+                jsonLong(raw, "updatedAt", 0L), jsonString(raw, "updatedBy"));
+    }
+
+    static String serializeChatRelayState(boolean enabled, long updatedAt, String updatedBy) {
+        return "{\n  \"chatRelay\": " + enabled
+                + ",\n  \"updatedAt\": " + updatedAt
+                + ",\n  \"updatedBy\": \"" + jsonEscape(updatedBy == null ? "" : updatedBy) + "\"\n}\n";
+    }
+
+    static final Pattern GAME_AT_NAME = Pattern.compile(
+            "(?<=^|[\\s\\[(])@([A-Za-z0-9_]{1,16})(?![A-Za-z0-9_])");
+
+    static List<GameAtPart> splitGameAtMentions(String text) {
+        List<GameAtPart> out = new ArrayList<>();
+        if (text == null || text.isEmpty()) {
+            out.add(GameAtPart.text(""));
+            return out;
+        }
+        Matcher matcher = GAME_AT_NAME.matcher(text);
+        int last = 0;
+        while (matcher.find()) {
+            if (matcher.start() > last)
+                out.add(GameAtPart.text(text.substring(last, matcher.start())));
+            out.add(GameAtPart.mention(matcher.group(1)));
+            last = matcher.end();
+        }
+        if (last < text.length())
+            out.add(GameAtPart.text(text.substring(last)));
+        if (out.isEmpty())
+            out.add(GameAtPart.text(text));
+        return out;
     }
 
     void bindPlayer(String qq, String rawName, String operatorQq, String operatorName, boolean forOther)
@@ -2767,6 +3136,37 @@ public class QQConsoleBridge {
         failed += assertBind("parse-one", parsed.size() == 1 && parsed.get(0).name.equals("Steve"), true);
         String json = serializePlayerBinds(parsed);
         failed += assertBind("roundtrip", parsePlayerBinds(json).size() == 1, true);
+        List<GameAtPart> atParts = splitGameAtMentions("来帮我 @Steve 挖矿");
+        failed += assertBind("at-split", atParts.size() == 3
+                && "text".equals(atParts.get(0).type) && atParts.get(0).value.equals("来帮我 ")
+                && "mention".equals(atParts.get(1).type) && atParts.get(1).value.equals("Steve")
+                && atParts.get(2).value.equals(" 挖矿"), true);
+        failed += assertBind("at-multi", splitGameAtMentions("@Steve 和 @Alex").stream()
+                .filter(part -> "mention".equals(part.type)).count() == 2, true);
+        failed += assertBind("at-email", splitGameAtMentions("mail steve@gmail.com").stream()
+                .noneMatch(part -> "mention".equals(part.type)), true);
+        failed += assertBind("at-url", splitGameAtMentions("见 https://x.com/@Steve").stream()
+                .noneMatch(part -> "mention".equals(part.type)), true);
+        failed += assertBind("at-bracket", splitGameAtMentions("来[@Steve]").stream()
+                .anyMatch(part -> "mention".equals(part.type) && "Steve".equals(part.value)), true);
+        failed += assertBind("remind-bound", shouldRemindUnbound(true, true, false, true, true,
+                null, 1000L, 360_000L), false);
+        failed += assertBind("remind-unbound", shouldRemindUnbound(true, true, false, true, false,
+                null, 1000L, 360_000L), true);
+        failed += assertBind("remind-cooldown", shouldRemindUnbound(true, true, false, true, false,
+                900L, 1000L, 360_000L), false);
+        failed += assertBind("remind-off", shouldRemindUnbound(true, false, false, true, false,
+                null, 1000L, 360_000L), false);
+        ChatRelayState off = parseChatRelayState("{\"chatRelay\":false,\"updatedAt\":1,\"updatedBy\":\"a\"}");
+        failed += assertBind("relay-off", off != null && !off.enabled && off.updatedAt == 1L, true);
+        failed += assertBind("relay-bad", parseChatRelayState("{") == null, true);
+        failed += assertBind("relay-roundtrip", parseChatRelayState(
+                serializeChatRelayState(true, 2L, "op")).enabled, true);
+        ChatRelayState remindOff = parseRemindUnboundState(
+                "{\"remindUnbound\":false,\"updatedAt\":1,\"updatedBy\":\"a\"}");
+        failed += assertBind("remind-file-off", remindOff != null && !remindOff.enabled, true);
+        failed += assertBind("remind-file-roundtrip", !parseRemindUnboundState(
+                serializeRemindUnboundState(false, 3L, "op")).enabled, true);
         Path tmp = root.resolve("tmp").resolve("qq-player-bind-selftest.json");
         try {
             Files.createDirectories(tmp.getParent());
@@ -2921,12 +3321,121 @@ public class QQConsoleBridge {
         return new QQMessageSegment(segment.type(), data);
     }
 
+    // AI 视觉输入优先走现成图床的公网直链：Qwen 可直接拉取，避免把 QQ 临时链接交给模型。
+    // 上传失败时保留原链接，保证图床异常不会把原本可读的图片变成不可用图片。
+    List<String> prepareAiImageUrls(List<String> images) {
+        if (images == null || images.isEmpty())
+            return List.of();
+        List<String> result = new ArrayList<>(images.size());
+        ImageHostConfig ih = config.imageHost;
+        if (!ih.enabled || !ih.autoRelay)
+            return resultWithNonBlankImages(images);
+        String token = resolveImageHostToken();
+        if (token.isBlank())
+            return resultWithNonBlankImages(images);
+
+        for (String source : images) {
+            if (source == null || source.isBlank())
+                continue;
+            if (isOwnImageHostUrl(source)) {
+                String publicUrl = imageHostPublicObjectUrl(source);
+                result.add(publicUrl.isBlank() ? source : publicUrl);
+                continue;
+            }
+
+            String sourceKey = "ai-source:" + sha256Hex(source);
+            String hosted = cachedRelayImageUrl(sourceKey);
+            if (!hosted.isBlank()) {
+                result.add(hosted);
+                continue;
+            }
+
+            try {
+                byte[] bytes = loadAiImageBytes(source);
+                if (bytes == null || bytes.length == 0 || bytes.length > ih.maxBytes) {
+                    result.add(source);
+                    continue;
+                }
+                String digest = sha256Hex(bytes);
+                String digestKey = "ai-sha256:" + digest;
+                hosted = cachedRelayImageUrl(digestKey);
+                if (!hosted.isBlank()) {
+                    putRelayImageCache(sourceKey, hosted);
+                    result.add(hosted);
+                    continue;
+                }
+
+                String ext = detectImageExt(bytes);
+                if (ext == null) {
+                    result.add(source);
+                    continue;
+                }
+                String uploadName = "qq-ai-" + digest.substring(0, Math.min(20, digest.length())) + ext;
+                ImageHostUploadResult uploaded = uploadToImageHost(bytes, uploadName, token);
+                if (!uploaded.ok || uploaded.name.isBlank()) {
+                    result.add(source);
+                    log("AI 图片自动转存失败，保留原图链接："
+                            + (uploaded.error.isBlank() ? "图床未返回文件名" : uploaded.error));
+                    continue;
+                }
+                hosted = imageHostPublicObjectUrl(imageHostObjectUrl(uploaded.name));
+                if (hosted.isBlank()) {
+                    result.add(source);
+                    log("AI 图片自动转存成功，但图床公网地址未配置，保留原图链接");
+                    continue;
+                }
+                putRelayImageCache(sourceKey, hosted);
+                putRelayImageCache(digestKey, hosted);
+                result.add(hosted);
+                log("AI 图片已自动转存图床：name=" + uploaded.name + " size=" + bytes.length);
+            } catch (Exception ex) {
+                result.add(source);
+                log("AI 图片自动转存异常，保留原图链接：" + messageOf(ex));
+            }
+        }
+        return result;
+    }
+
+    static List<String> resultWithNonBlankImages(List<String> images) {
+        List<String> result = new ArrayList<>();
+        for (String image : images) {
+            if (image != null && !image.isBlank())
+                result.add(image);
+        }
+        return result;
+    }
+
+    byte[] loadAiImageBytes(String source) {
+        if (source == null || source.isBlank())
+            return null;
+        if (source.regionMatches(true, 0, "data:", 0, 5)) {
+            int comma = source.indexOf(',');
+            if (comma < 0 || !source.substring(0, comma).toLowerCase(java.util.Locale.ROOT)
+                    .contains(";base64"))
+                return null;
+            try {
+                return java.util.Base64.getDecoder().decode(source.substring(comma + 1));
+            } catch (IllegalArgumentException ex) {
+                return null;
+            }
+        }
+        if (!(source.startsWith("https://") || source.startsWith("http://")))
+            return null;
+        // 自己的图床走直连，QQ/CDN 等外部地址沿用 ops 里配置的代理。
+        return isOwnImageHostUrl(source) ? httpGetBytes(source, false) : httpGetBytes(source, 20);
+    }
+
     boolean isOwnImageHostUrl(String url) {
         if (url == null || url.isBlank())
             return false;
-        String base = trimTrailingSlash(firstNonBlank(config.imageHost.minecraftBaseUrl,
-                config.imageHost.publicBaseUrl, config.imageHost.lanBaseUrl));
-        return !base.isBlank() && url.startsWith(base + "/");
+        String[] bases = { config.imageHost.publicBaseUrl, config.imageHost.minecraftBaseUrl,
+                config.imageHost.lanBaseUrl };
+        for (String configured : bases) {
+            String base = trimTrailingSlash(configured);
+            if (!base.isBlank() && url.startsWith(base + "/"))
+                return true;
+        }
+        return false;
     }
 
     String imageHostObjectUrl(String name) {
@@ -3121,7 +3630,7 @@ public class QQConsoleBridge {
         String file = firstNonBlank(segment.value("file"), segment.value("name"));
         String lowerFile = file.toLowerCase(java.util.Locale.ROOT);
         return summary.contains("动画表情") || summary.contains("表情包")
-                // OneBot/NapCat 的 image 子类型字段有时没有 summary，只能从 subtype 判断。
+                // OneBot image.subType=1/2 是表情/斗图；QQ 有时不提供 summary，只提供 subType。
                 || subtype.equals("1") || subtype.equals("2")
                 || lowerFile.endsWith(".gif") || lowerFile.endsWith(".webp")
                 || lowerFile.endsWith(".apng");
@@ -3695,7 +4204,7 @@ public class QQConsoleBridge {
     }
 
     // 有些兼容接口会把“让我读取文件/然后修改”当普通文本返回，而不是返回 tool_calls。
-    // 这种内容不是最终答案：若直接发送，用户就会看到“说到一半”。
+    // 这种内容不是最终答案：若直接发送，用户就会看到截图中的“说到一半”。
     // 只对管理员、短小且明显带执行计划的文本触发一次续问，避免把正常闲聊误判成工具调用。
     static boolean looksLikeToolPlan(String answer, String question, boolean privileged) {
         if (!privileged || answer == null || question == null)
@@ -3733,9 +4242,21 @@ public class QQConsoleBridge {
     }
 
     String extraThinkingJson(AiProvider provider) {
-        if (provider == null || provider.thinking == null || provider.thinking.isBlank())
+        if (provider == null)
             return "";
-        String mode = provider.thinking.trim().toLowerCase(java.util.Locale.ROOT);
+        String mode = provider.thinking == null ? ""
+                : provider.thinking.trim().toLowerCase(java.util.Locale.ROOT);
+        String providerName = provider.name == null ? "" : provider.name;
+        String providerModel = provider.model == null ? "" : provider.model;
+        boolean qwen = providerName.equalsIgnoreCase("qwen")
+                || providerModel.toLowerCase(java.util.Locale.ROOT).startsWith("qwen");
+        if (qwen) {
+            // Qwen 官方兼容接口使用 enable_thinking；默认关闭，避免视觉请求把总超时吃完。
+            return (mode.equals("enabled") || mode.equals("true") || mode.equals("on"))
+                    ? ",\"enable_thinking\":true" : ",\"enable_thinking\":false";
+        }
+        if (mode.isBlank())
+            return "";
         if (mode.equals("disabled") || mode.equals("false") || mode.equals("off") || mode.equals("none"))
             return ",\"thinking\":{\"type\":\"disabled\"}";
         if (mode.equals("enabled") || mode.equals("true") || mode.equals("on"))
@@ -3990,7 +4511,7 @@ public class QQConsoleBridge {
             long sendElapsed = (System.nanoTime() - sendStarted) / 1_000_000L;
             log("AI 回复完成：AI处理耗时=" + ((sendStarted - aiStarted) / 1_000_000L)
                     + "ms，OneBot 发送调用耗时=" + sendElapsed + "ms");
-        } catch (Exception ex) {
+        } catch (Throwable ex) {
             String detail = messageOf(ex);
             long failedElapsed = System.nanoTime() - aiStarted;
             String usageTail = formatAiFooter(usage, failedElapsed);
@@ -4286,7 +4807,28 @@ public class QQConsoleBridge {
     }
 
     // 两阶段视觉预处理：视觉模型只读取图片并返回文字报告，不接收服务器工具，也不负责最终回答。
+    // 公网 GIF 读取失败时才抽 3 张关键帧重试，避免每次请求都付出解码和额外上传成本。
     String runVisionPreprocess(AiProvider vision, String question, List<String> images,
+            long aiDeadlineNanos, AiUsage visionUsage) throws Exception {
+        try {
+            return runVisionPreprocessOnce(vision, question, images, aiDeadlineNanos, visionUsage);
+        } catch (Exception first) {
+            List<String> fallbackImages = extractGifKeyFrameDataUrls(images);
+            if (fallbackImages.isEmpty())
+                throw first;
+            log("AI 视觉原图读取失败，改用 GIF 关键帧重试：" + fallbackImages.size() + " 张");
+            try {
+                return runVisionPreprocessOnce(vision,
+                        (question == null ? "" : question) + "\n（GIF 已抽取开头/中间/结尾关键帧）",
+                        fallbackImages, aiDeadlineNanos, visionUsage);
+            } catch (Exception retry) {
+                retry.addSuppressed(first);
+                throw retry;
+            }
+        }
+    }
+
+    String runVisionPreprocessOnce(AiProvider vision, String question, List<String> images,
             long aiDeadlineNanos, AiUsage visionUsage) throws Exception {
         String key = vision.resolveKey();
         if (key.isBlank())
@@ -4320,9 +4862,102 @@ public class QQConsoleBridge {
         return report;
     }
 
+    List<String> extractGifKeyFrameDataUrls(List<String> images) {
+        if (images == null || images.isEmpty())
+            return List.of();
+        List<String> frames = new ArrayList<>();
+        List<String> staticImages = new ArrayList<>();
+        boolean foundGif = false;
+        for (String source : images) {
+            if (source == null || source.isBlank())
+                continue;
+            byte[] bytes = loadAiImageBytes(source);
+            if (bytes == null)
+                continue;
+            if (".gif".equals(detectImageExt(bytes))) {
+                foundGif = true;
+                if (frames.size() < 3)
+                    frames.addAll(gifKeyFrameDataUrls(bytes, 3 - frames.size()));
+            } else {
+                staticImages.add(source);
+            }
+        }
+        if (!foundGif)
+            return List.of();
+        // GIF 关键帧优先，静图只填剩余名额。
+        List<String> result = new ArrayList<>(3);
+        for (String frame : frames) {
+            if (result.size() >= 3)
+                break;
+            result.add(frame);
+        }
+        for (String staticImage : staticImages) {
+            if (result.size() >= 3)
+                break;
+            result.add(staticImage);
+        }
+        return result.isEmpty() ? List.of() : result;
+    }
+
+    static List<String> gifKeyFrameDataUrls(byte[] bytes, int maxFrames) {
+        if (bytes == null || bytes.length == 0 || maxFrames <= 0)
+            return List.of();
+        List<String> result = new ArrayList<>();
+        javax.imageio.ImageReader reader = null;
+        javax.imageio.stream.ImageInputStream input = null;
+        try {
+            Iterator<javax.imageio.ImageReader> readers = ImageIO.getImageReadersByFormatName("gif");
+            if (!readers.hasNext())
+                return result;
+            reader = readers.next();
+            input = ImageIO.createImageInputStream(new ByteArrayInputStream(bytes));
+            if (input == null)
+                return result;
+            reader.setInput(input, false, false);
+            int frameCount = Math.max(1, reader.getNumImages(true));
+            LinkedHashSet<Integer> indexes = new LinkedHashSet<>();
+            indexes.add(0);
+            if (frameCount > 2)
+                indexes.add(frameCount / 2);
+            if (frameCount > 1)
+                indexes.add(frameCount - 1);
+            for (Integer index : indexes) {
+                if (result.size() >= maxFrames)
+                    break;
+                try {
+                    BufferedImage frame = reader.read(index);
+                    if (frame == null)
+                        continue;
+                    java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                    if (!ImageIO.write(frame, "png", out))
+                        continue;
+                    byte[] png = out.toByteArray();
+                    if (png.length == 0 || png.length > 4_000_000)
+                        continue;
+                    result.add("data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(png));
+                } catch (Exception ignored) {
+                    // 单帧损坏不影响其它关键帧。
+                }
+            }
+        } catch (Exception ignored) {
+            // GIF 解码失败时由调用方继续使用原始异常，不额外制造新的错误。
+        } finally {
+            if (reader != null)
+                reader.dispose();
+            if (input != null) {
+                try {
+                    input.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+        return result;
+    }
+
     String runAiAgent(String question, List<String> images, boolean privileged, String group,
             long actorId, String actorName, AiUsage usage) throws Exception {
-        int imageCount = images == null ? 0 : images.size();
+        images = prepareAiImageUrls(images);
+        int imageCount = images.size();
         // 两阶段流程：默认模型始终负责最终回答/工具；默认模型看不了图时，视觉备选只做图片预处理。
         AiProvider ai = config.ai.active();
         usage.provider = ai;
@@ -11529,6 +12164,7 @@ public class QQConsoleBridge {
             out.append("\n\n管理：")
                     .append(p).append("tps  ").append(p).append("cmd  ").append(p).append("say\n")
                     .append(p).append("stop / ").append(p).append("restart（先 ").append(p).append("确认 码）\n")
+                    .append(p).append("转发 开|关  ").append(p).append("绑定提醒 开|关 / ").append(p).append("未绑定\n")
                     .append("引用压缩包后 ").append(p).append("升级模组");
             out.append("\n不常用运维发 ").append(p).append("help 运维");
         } else {
@@ -11546,6 +12182,7 @@ public class QQConsoleBridge {
                 + p + "backup [force] / " + p + "save / " + p + "验备份\n"
                 + p + "模组进度 / " + p + "取消升级模组\n"
                 + p + "绑定 @QQ 游戏ID / " + p + "绑定列表\n"
+                + p + "转发 开|关 / " + p + "绑定提醒 开|关 / " + p + "未绑定\n"
                 + p + "seed / " + p + "weather 晴|雨|雷\n"
                 + p + "取消确认     作废确认码";
     }
@@ -12040,6 +12677,58 @@ public class QQConsoleBridge {
                 || c.equalsIgnoreCase("changelog") || c.equalsIgnoreCase("updates");
     }
 
+    /**
+     * 从发布摘要中只保留 Mod 变更，兼容旧版本把配置/其他文件混在同一份摘要里的情况。
+     */
+    static String filterModOnlySummary(String raw) {
+        if (raw == null || raw.isBlank())
+            return "";
+        String normalized = raw.replace("\r\n", "\n").replace('\r', '\n').trim();
+        boolean hasModSection = false;
+        for (String line : normalized.split("\n", -1)) {
+            if (line.trim().startsWith("Mod ")) {
+                hasModSection = true;
+                break;
+            }
+        }
+        if (!hasModSection)
+            return "";
+
+        StringBuilder filtered = new StringBuilder();
+        boolean inChangeSection = false;
+        boolean inModBlock = false;
+        boolean sawModBlock = false;
+        for (String line : normalized.split("\n", -1)) {
+            String trimmed = line.trim();
+            if (!inChangeSection) {
+                filtered.append(line).append('\n');
+                if (trimmed.startsWith("本次变更") || trimmed.startsWith("本次模组变更"))
+                    inChangeSection = true;
+                continue;
+            }
+
+            if (trimmed.startsWith("Mod ")) {
+                inModBlock = true;
+                sawModBlock = true;
+                filtered.append(line).append('\n');
+            } else if (trimmed.matches("^(配置|其他)\\s+.*")) {
+                inModBlock = false;
+            } else if (trimmed.startsWith("玩家可运行") || trimmed.startsWith("服务器：")) {
+                inModBlock = false;
+                if (filtered.length() > 0 && filtered.charAt(filtered.length() - 1) != '\n')
+                    filtered.append('\n');
+                filtered.append(line).append('\n');
+            } else if (trimmed.isBlank()) {
+                if (!sawModBlock || inModBlock)
+                    filtered.append(line).append('\n');
+            } else if (inModBlock && (trimmed.startsWith("~ ") || trimmed.startsWith("+ ")
+                    || trimmed.startsWith("- ") || trimmed.startsWith("…"))) {
+                filtered.append(line).append('\n');
+            }
+        }
+        return filtered.toString().replaceAll("\\n{3,}", "\n\n").trim();
+    }
+
     String formatLastModUpdate() {
         Path[] candidates = {
                 root.resolve("logs").resolve("last-mod-update.txt"),
@@ -12049,14 +12738,15 @@ public class QQConsoleBridge {
             try {
                 if (!Files.isRegularFile(p))
                     continue;
-                String text = Files.readString(p).trim();
+                String text = filterModOnlySummary(Files.readString(p));
                 if (text.isBlank())
                     continue;
-                return "[模组更新]\n" + truncate(text, 3200);
+                String prefix = text.startsWith("[模组更新]") ? "" : "[模组更新]\n";
+                return prefix + truncate(text, 3200);
             } catch (Exception ignored) {
             }
         }
-        return "[模组更新] 还没有发布变更摘要。管理员发布一次更新后，这里会显示最近一次的模组增删改。";
+        return "[模组更新] 还没有模组变更记录。管理员发布一次包含模组变更的更新后，这里会显示最近一次的模组增删改。";
     }
 
     String formatDdnsStatus() {
@@ -12992,6 +13682,48 @@ public class QQConsoleBridge {
     record CachedPlayer(String name, String uuid) {
     }
 
+    static final class RecentQqSpeaker {
+        final String qq;
+        final String card;
+        final long lastSpeakAt;
+
+        RecentQqSpeaker(String qq, String card, long lastSpeakAt) {
+            this.qq = qq == null ? "" : qq.trim();
+            this.card = card == null ? "" : card.trim();
+            this.lastSpeakAt = lastSpeakAt;
+        }
+    }
+
+    static final class ChatRelayState {
+        final boolean enabled;
+        final long updatedAt;
+        final String updatedBy;
+
+        ChatRelayState(boolean enabled, long updatedAt, String updatedBy) {
+            this.enabled = enabled;
+            this.updatedAt = updatedAt;
+            this.updatedBy = updatedBy == null ? "" : updatedBy;
+        }
+    }
+
+    static final class GameAtPart {
+        final String type;
+        final String value;
+
+        GameAtPart(String type, String value) {
+            this.type = type == null ? "text" : type;
+            this.value = value == null ? "" : value;
+        }
+
+        static GameAtPart text(String value) {
+            return new GameAtPart("text", value);
+        }
+
+        static GameAtPart mention(String name) {
+            return new GameAtPart("mention", name);
+        }
+    }
+
     static final class PlayerBind {
         final String qq;
         final String name;
@@ -13175,7 +13907,7 @@ public class QQConsoleBridge {
         }
 
         synchronized boolean applyDeepSeekPrice(DeepSeekPriceSnapshot snapshot) {
-            if (snapshot == null || !isDeepSeek() || !isOfficialDeepSeekApi())
+            if (snapshot == null || !isDeepSeek())
                 return false;
             String modelId = model == null ? "" : model.toLowerCase(java.util.Locale.ROOT);
             boolean flash = modelId.contains("deepseek-v4-flash");
@@ -13229,17 +13961,6 @@ public class QQConsoleBridge {
             String u = apiUrl == null ? "" : apiUrl.toLowerCase(java.util.Locale.ROOT);
             String m = model == null ? "" : model.toLowerCase(java.util.Locale.ROOT);
             return n.contains("deepseek") || u.contains("api.deepseek.com") || m.startsWith("deepseek-");
-        }
-
-        boolean isOfficialDeepSeekApi() {
-            try {
-                URI uri = URI.create(apiUrl == null ? "" : apiUrl.trim());
-                return "https".equalsIgnoreCase(uri.getScheme())
-                        && "api.deepseek.com".equalsIgnoreCase(uri.getHost())
-                        && uri.getUserInfo() == null && uri.getPort() <= 0;
-            } catch (Exception ex) {
-                return false;
-            }
         }
 
         boolean isLocalCli() {
@@ -13706,6 +14427,8 @@ public class QQConsoleBridge {
         boolean memberAccess = true;
         boolean requireSeenOnServer = true;
         boolean showSkinHead = true;
+        boolean remindUnbound = true;
+        int remindCooldownMinutes = 360;
         int maxPerQq = 1;
         String namePattern = "^[A-Za-z0-9_]{1,16}$";
         String store = "logs/qq-player-binds.json";
@@ -14102,6 +14825,10 @@ public class QQConsoleBridge {
                     c.playerBind.requireSeenOnServer = jsonBoolean(bindJson, "requireSeenOnServer");
                 if (bindJson.contains("\"showSkinHead\""))
                     c.playerBind.showSkinHead = jsonBoolean(bindJson, "showSkinHead");
+                if (bindJson.contains("\"remindUnbound\""))
+                    c.playerBind.remindUnbound = jsonBoolean(bindJson, "remindUnbound");
+                c.playerBind.remindCooldownMinutes = jsonInt(bindJson, "remindCooldownMinutes",
+                        c.playerBind.remindCooldownMinutes);
                 c.playerBind.maxPerQq = jsonInt(bindJson, "maxPerQq", c.playerBind.maxPerQq);
                 String pattern = jsonString(bindJson, "namePattern");
                 if (!pattern.isBlank())

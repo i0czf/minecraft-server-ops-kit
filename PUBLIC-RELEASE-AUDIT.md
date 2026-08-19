@@ -9,12 +9,13 @@
 - 公版配置模板（`tools/*.example.json`）
 - 公版构建器、验证脚本和通用使用文档
 - 经脱敏的真实运行界面截图及展示文档（`docs/assets/`、`docs/live-ui-demo.md`）
-- 近期功能：备份验证、卡顿取证、事故复盘、BlueMap 时光机、模组发布事务、配方/要素索引、客户端自助修复、QQ 图片/表情包图床转发、QQ 与游戏 ID 绑定等
+- 近期功能：备份验证、卡顿取证、事故复盘、BlueMap 时光机、模组发布事务、配方/要素索引、客户端自助修复、QQ 图片/表情包图床转发、QQ 与游戏 ID 绑定，以及绑定提醒、游戏 `@ID` 点 QQ、`!转发` 开关等
 
 ## 明确排除
 
 - `tools/portable-pack.json`、`tools/ops-config.json`、`tools/portable-web-panel.json`、更新源 token、Web 面板令牌、RCON 密码
 - 世界、日志、备份、崩溃报告、玩家缓存、OP/白名单/封禁名单
+- 运行时绑定与开关：`logs/qq-player-binds.json`、`logs/qq-chat-relay.json`、`logs/qq-bind-remind.json`
 - 私服客户端、模组、地图、存档和服务端运行时目录
 - QQ/LLBot 登录数据、二维码、第三方 QQ 客户端、启动器和本机依赖
 - 私服域名、群号、频道号、机器人 token、DDNS/API 密钥和本机绝对路径
