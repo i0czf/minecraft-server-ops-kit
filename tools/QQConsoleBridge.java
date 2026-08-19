@@ -109,6 +109,13 @@ public class QQConsoleBridge {
                     new java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy());
     // 图床转存缓存：同一 QQ 图片短时间重复出现时不重复下载/上传。
     private final java.util.Map<String, RelayImageCacheEntry> relayImageCache = new ConcurrentHashMap<>();
+    // QQ 号 <-> 游戏 ID 绑定。文件落在 logs/qq-player-binds.json，热重载后仍在。
+    private final Object playerBindLock = new Object();
+    private final java.util.Map<String, PlayerBind> playerBindsByQq = new ConcurrentHashMap<>();
+    private final java.util.Map<String, PlayerBind> playerBindsByName = new ConcurrentHashMap<>();
+    private final java.util.Map<String, String> playerHeadUrlCache = new ConcurrentHashMap<>();
+    private volatile long usercacheLoadedAt = 0L;
+    private volatile List<CachedPlayer> usercacheSnapshot = List.of();
     // 滚动群聊缓冲（记录谁说了什么），供 AI 通过 read_recent_chat 了解群里聊了啥。
     // 按群号隔离：主群与各客群各存各的，AI 在哪个群提问就只读那个群的记录，互不串味、不污染。
     private final java.util.Map<String, java.util.ArrayDeque<String>> chatBuffers = new java.util.HashMap<>();
@@ -166,8 +173,10 @@ public class QQConsoleBridge {
         //   java QQConsoleBridge --aspect-items <查询>           离线验证物品要素反查与摘要图（不连 QQ）
         //   java QQConsoleBridge --inspect-mod <查询>            离线验证本机模组 JAR 元数据（不连 QQ）
         //   java QQConsoleBridge --wiki <查询>                   离线验证模组百科查询（不连 QQ）
+        //   java QQConsoleBridge --bind-selftest                 离线校验 QQ-游戏ID 绑定格式与仓库读写
         boolean syncOnly = false;
         boolean aiStatusOnly = false;
+        boolean bindSelftest = false;
         String aspectQuery = null;
         String aspectItemsQuery = null;
         String inspectModQuery = null;
@@ -179,6 +188,8 @@ public class QQConsoleBridge {
                 syncOnly = true;
             else if ("--ai-status".equals(a) || "-ai-status".equals(a))
                 aiStatusOnly = true;
+            else if ("--bind-selftest".equals(a) || "-bind-selftest".equals(a))
+                bindSelftest = true;
             else if ("--inspect-mod".equals(a) || "--inspect-mods".equals(a)) {
                 if (i + 1 >= args.length)
                     throw new IllegalArgumentException("--inspect-mod 后需要模组名");
@@ -204,6 +215,10 @@ public class QQConsoleBridge {
         }
         Path configPath = configArg != null ? Path.of(configArg) : Path.of("tools", "ops-config.json");
         Path root = configPath.toAbsolutePath().getParent().getParent();
+        if (bindSelftest) {
+            runPlayerBindSelftest(root);
+            return;
+        }
         if (aspectQuery != null) {
             System.out.println(formatAspectRecipe(root, aspectQuery, "!"));
             Path card = renderAspectCard(root, aspectQuery);
@@ -260,6 +275,7 @@ public class QQConsoleBridge {
     QQConsoleBridge(Path root, QQConfig config) {
         this.root = root;
         this.config = config;
+        loadPlayerBinds();
     }
 
     void run() throws Exception {
@@ -524,6 +540,8 @@ public class QQConsoleBridge {
                     + "，guestGroups=" + config.guestGroupIds
                     + "，guestMemberAccess=" + config.guestMemberAccess
                     + "，guestReadOnly=" + config.guestReadOnly
+                    + "，playerBind=" + config.playerBind.enabled
+                    + "，playerBinds=" + playerBindsByQq.size()
                     + "，wsPort=" + config.wsPort);
             if (config.modReleaseEnabled) {
                 log("模组升级权限已加载：sourceGroups=" + config.modReleaseGroupIds
@@ -1209,7 +1227,7 @@ public class QQConsoleBridge {
             List<QQMessageSegment> segments = messageSegments(msg);
             if (segments.isEmpty())
                 return;
-            enqueueRelayQQChat(msg.group, displayName, segments);
+            enqueueRelayQQChat(msg, displayName, segments);
             return;
         }
 
@@ -1272,7 +1290,11 @@ public class QQConsoleBridge {
             return;
         }
         if (command.equalsIgnoreCase("id") || command.equalsIgnoreCase("whoami")) {
-            sendGroupMsg("[QQ控制台] " + displayName + " 的 QQ 号：" + msg.senderId);
+            sendGroupMsg(formatWhoami(msg, displayName));
+            return;
+        }
+        if (isPlayerBindCommand(word)) {
+            handlePlayerBindCommand(msg, displayName, command, privileged);
             return;
         }
         if (command.equalsIgnoreCase("list")) {
@@ -2120,30 +2142,35 @@ public class QQConsoleBridge {
         return word.equalsIgnoreCase("help") || word.equals("帮助")
                 || word.equalsIgnoreCase("wiki") || word.equals("百科") || word.equals("模组百科")
                 || word.equalsIgnoreCase("ai") || word.equals("模型")
-                || word.equalsIgnoreCase("ask") || word.equals("问") || word.equals("诊断");
+                || word.equalsIgnoreCase("ask") || word.equals("问") || word.equals("诊断")
+                || word.equals("绑定") || word.equalsIgnoreCase("bind")
+                || word.equals("解绑") || word.equalsIgnoreCase("unbind")
+                || word.equals("绑定查询") || word.equalsIgnoreCase("bindquery");
     }
 
     void relayQQChat(String group, String displayName, String content) {
-        relayQQChat(group, displayName, parseCqMessageSegments(content));
+        relayQQChat(group, displayName, parseCqMessageSegments(content), 0L);
     }
 
-    void enqueueRelayQQChat(String group, String displayName, List<QQMessageSegment> segments) {
+    void enqueueRelayQQChat(QQMessage msg, String displayName, List<QQMessageSegment> segments) {
         if (segments == null || segments.isEmpty())
             return;
         List<QQMessageSegment> snapshot = List.copyOf(segments);
-        qqChatRelayExecutor.execute(() -> relayQQChat(group, displayName, snapshot));
+        long senderId = msg == null ? 0L : msg.senderId;
+        String group = msg == null ? "" : msg.group;
+        qqChatRelayExecutor.execute(() -> relayQQChat(group, displayName, snapshot, senderId));
     }
 
     void relayQQChat(String group, String displayName, List<QQMessageSegment> segments) {
+        relayQQChat(group, displayName, segments, 0L);
+    }
+
+    void relayQQChat(String group, String displayName, List<QQMessageSegment> segments, long senderId) {
         if (segments == null || segments.isEmpty())
             return;
         List<QQMessageSegment> prepared = prepareRelaySegments(segments);
-        // groupLabels 有值才带 [群名] 前缀；官服主群可不配/留空，公屏更短不挡视野
-        String label = config.groupLabel(group);
-        String prefix = label.isBlank()
-                ? displayName + ": "
-                : "[" + label + "] " + displayName + ": ";
-        prefix = truncate(prefix, 96);
+        PlayerBind bind = findBindByQq(String.valueOf(senderId));
+        List<String> prefix = buildRelayPrefixComponents(group, displayName, bind);
         String tellraw = renderMinecraftTellraw(prefix, prepared);
         if (tellraw.isBlank())
             return;
@@ -2152,6 +2179,616 @@ public class QQConsoleBridge {
         } catch (Exception ex) {
             log("QQ 聊天转发到游戏失败：" + messageOf(ex));
         }
+    }
+
+    static boolean isPlayerBindCommand(String word) {
+        if (word == null)
+            return false;
+        return word.equals("绑定") || word.equalsIgnoreCase("bind")
+                || word.equals("解绑") || word.equalsIgnoreCase("unbind")
+                || word.equals("绑定查询") || word.equalsIgnoreCase("bindquery")
+                || word.equals("绑定列表") || word.equalsIgnoreCase("bindlist");
+    }
+
+    String formatWhoami(QQMessage msg, String displayName) {
+        String who = displayName == null || displayName.isBlank() ? "你" : displayName;
+        String qq = msg == null ? "" : String.valueOf(msg.senderId);
+        PlayerBind bind = findBindByQq(qq);
+        if (bind == null)
+            return "[QQ控制台] " + who + " 的 QQ 号：" + qq
+                    + "\n还没绑定游戏ID。在主群发 " + config.prefix + "绑定 你的游戏ID";
+        return "[QQ控制台] " + who + " 的 QQ 号：" + qq
+                + "\n已绑定游戏ID：" + bind.name;
+    }
+
+    void handlePlayerBindCommand(QQMessage msg, String displayName, String command, boolean privileged)
+            throws Exception {
+        if (!config.playerBind.enabled) {
+            sendGroupMsg("[绑定] 绑定功能未开启。");
+            return;
+        }
+        if (!privileged && !config.playerBind.memberAccess) {
+            sendGroupMsg("[绑定] 当前仅管理员可绑定。");
+            return;
+        }
+        String word = firstWord(command);
+        String rest = command.substring(word.length()).trim();
+        if (word.equals("解绑") || word.equalsIgnoreCase("unbind")) {
+            handlePlayerUnbind(msg, displayName, rest, privileged);
+            return;
+        }
+        if (word.equals("绑定列表") || word.equalsIgnoreCase("bindlist")) {
+            handlePlayerBindList(privileged);
+            return;
+        }
+        if (word.equals("绑定查询") || word.equalsIgnoreCase("bindquery")) {
+            handlePlayerBindQuery(msg, rest, privileged);
+            return;
+        }
+        String lowerRest = rest.toLowerCase(java.util.Locale.ROOT);
+        if (lowerRest.equals("列表") || lowerRest.equals("list") || lowerRest.equals("全部")
+                || lowerRest.equals("all")) {
+            handlePlayerBindList(privileged);
+            return;
+        }
+        if (lowerRest.equals("查询") || lowerRest.startsWith("查询 ")
+                || lowerRest.equals("query") || lowerRest.startsWith("query ")) {
+            String query = rest.replaceFirst("(?i)^(查询|query)\\s*", "").trim();
+            handlePlayerBindQuery(msg, query, privileged);
+            return;
+        }
+        if (rest.isBlank()) {
+            PlayerBind mine = findBindByQq(String.valueOf(msg.senderId));
+            if (mine == null) {
+                sendGroupMsg("[绑定] 还没绑定游戏ID。\n用法：" + config.prefix + "绑定 你的游戏ID"
+                        + "\n解绑：" + config.prefix + "解绑"
+                        + "\n查询：" + config.prefix + "绑定查询");
+                return;
+            }
+            sendGroupMsg("[绑定] " + displayName + " 已绑定 " + mine.name);
+            return;
+        }
+        String targetQq = extractBindTargetQq(msg, rest);
+        String playerName = extractBindPlayerName(rest);
+        if (playerName.isBlank()) {
+            sendGroupMsg("[绑定] 请写出游戏ID，例如：" + config.prefix + "绑定 Steve");
+            return;
+        }
+        boolean forOther = !targetQq.isBlank() && !targetQq.equals(String.valueOf(msg.senderId));
+        if (forOther && !privileged) {
+            sendGroupMsg("[绑定] 给别人绑游戏ID 需要管理员。你自己绑请直接发 "
+                    + config.prefix + "绑定 你的游戏ID");
+            return;
+        }
+        if (targetQq.isBlank())
+            targetQq = String.valueOf(msg.senderId);
+        bindPlayer(targetQq, playerName, String.valueOf(msg.senderId), displayName, forOther);
+    }
+
+    void handlePlayerUnbind(QQMessage msg, String displayName, String rest, boolean privileged)
+            throws Exception {
+        String targetQq = extractBindTargetQq(msg, rest);
+        String playerName = extractBindPlayerName(rest);
+        PlayerBind target = null;
+        if (!targetQq.isBlank())
+            target = findBindByQq(targetQq);
+        if (target == null && !playerName.isBlank())
+            target = findBindByName(playerName);
+        if (target == null && rest.isBlank())
+            target = findBindByQq(String.valueOf(msg.senderId));
+        if (target == null) {
+            sendGroupMsg(rest.isBlank()
+                    ? "[绑定] 你还没绑定游戏ID。"
+                    : "[绑定] 没找到要解绑的对象。");
+            return;
+        }
+        boolean own = target.qq.equals(String.valueOf(msg.senderId));
+        if (!own && !privileged) {
+            sendGroupMsg("[绑定] 只能解绑自己的游戏ID。");
+            return;
+        }
+        if (removePlayerBind(target.qq))
+            sendGroupMsg("[绑定] 已解绑 " + (own ? displayName : "QQ " + target.qq)
+                    + " ↔ " + target.name);
+        else
+            sendGroupMsg("[绑定] 解绑失败，请稍后再试。");
+    }
+
+    void handlePlayerBindQuery(QQMessage msg, String rest, boolean privileged) throws Exception {
+        String targetQq = extractBindTargetQq(msg, rest);
+        String playerName = extractBindPlayerName(rest);
+        PlayerBind target = null;
+        if (!targetQq.isBlank())
+            target = findBindByQq(targetQq);
+        if (target == null && !playerName.isBlank())
+            target = findBindByName(playerName);
+        if (target == null && rest.isBlank())
+            target = findBindByQq(String.valueOf(msg.senderId));
+        if (target == null) {
+            sendGroupMsg(rest.isBlank()
+                    ? "[绑定] 你还没绑定游戏ID。"
+                    : "[绑定] 没查到绑定。");
+            return;
+        }
+        boolean own = target.qq.equals(String.valueOf(msg.senderId));
+        if (own || privileged)
+            sendGroupMsg("[绑定] QQ " + target.qq + " ↔ " + target.name);
+        else
+            sendGroupMsg("[绑定] " + target.name + " 已绑定");
+    }
+
+    void handlePlayerBindList(boolean privileged) throws Exception {
+        if (!privileged) {
+            sendGroupMsg("[绑定] 查看完整绑定列表需要管理员。自己的绑定发 "
+                    + config.prefix + "绑定查询");
+            return;
+        }
+        List<PlayerBind> all = listPlayerBinds();
+        if (all.isEmpty()) {
+            sendGroupMsg("[绑定] 现在还没有人绑定。");
+            return;
+        }
+        StringBuilder out = new StringBuilder("[绑定] 共 ").append(all.size()).append(" 条：");
+        int n = 0;
+        for (PlayerBind bind : all) {
+            if (n++ >= 40) {
+                out.append("\n…其余 ").append(all.size() - 40).append(" 条略");
+                break;
+            }
+            out.append("\n").append(n).append(". ").append(bind.name).append(" ↔ ").append(bind.qq);
+        }
+        sendGroupMsg(out.toString());
+    }
+
+    void bindPlayer(String qq, String rawName, String operatorQq, String operatorName, boolean forOther)
+            throws Exception {
+        String pattern = config.playerBind.namePattern;
+        if (!isValidPlayerName(rawName, pattern)) {
+            sendGroupMsg("[绑定] 游戏ID不合法。需要 1-16 位字母、数字或下划线。");
+            return;
+        }
+        CachedPlayer seen = lookupUsercache(rawName);
+        String name = seen != null ? seen.name : rawName;
+        String uuid = seen != null ? seen.uuid : "";
+        if (config.playerBind.requireSeenOnServer && seen == null) {
+            sendGroupMsg("[绑定] " + rawName + " 还没进过这台服。先用这个ID上一次线，再发 "
+                    + config.prefix + "绑定 " + rawName);
+            return;
+        }
+        if (uuid.isBlank())
+            uuid = offlinePlayerUuid(name);
+        PlayerBind existingName = findBindByName(name);
+        if (existingName != null && !existingName.qq.equals(qq)) {
+            sendGroupMsg("[绑定] " + name + " 已经被别人绑定了。");
+            return;
+        }
+        PlayerBind existingQq = findBindByQq(qq);
+        if (existingQq != null && existingQq.name.equalsIgnoreCase(name)) {
+            sendGroupMsg("[绑定] " + (forOther ? ("QQ " + qq) : "你") + " 已经绑定过 " + existingQq.name + "。");
+            return;
+        }
+        int max = Math.max(1, config.playerBind.maxPerQq);
+        if (existingQq != null && max <= 1) {
+            // 默认一人一号：再绑一次就是改绑，不需要先解绑。
+        } else if (existingQq != null && max > 1) {
+            sendGroupMsg("[绑定] 这个 QQ 已经绑定了 " + existingQq.name + "，先 "
+                    + config.prefix + "解绑 再换。");
+            return;
+        }
+        PlayerBind next = new PlayerBind(qq, name, uuid, System.currentTimeMillis(), operatorQq);
+        if (!savePlayerBind(next)) {
+            sendGroupMsg("[绑定] 写入失败，请稍后再试。");
+            return;
+        }
+        String who = forOther ? ("QQ " + qq) : operatorName;
+        if (existingQq != null && !existingQq.name.equalsIgnoreCase(name))
+            sendGroupMsg("[绑定] " + who + " 已改绑 " + existingQq.name + " → " + name);
+        else
+            sendGroupMsg("[绑定] " + who + " 已绑定 " + name + "。之后群消息进游戏会带上这个ID。");
+        warmupBoundSkin(next);
+    }
+
+    String extractBindTargetQq(QQMessage msg, String rest) {
+        String fromSegments = extractFirstAtQq(msg == null ? "" : msg.content, messageSegments(msg));
+        if (!fromSegments.isBlank())
+            return fromSegments;
+        if (rest == null)
+            return "";
+        Matcher cq = Pattern.compile("(?i)\\[CQ:at,qq=(\\d{5,15})").matcher(rest);
+        if (cq.find())
+            return cq.group(1);
+        Matcher at = Pattern.compile("(?i)@(\\d{5,15})\\b").matcher(rest);
+        if (at.find())
+            return at.group(1);
+        Matcher bare = Pattern.compile("(?i)(?:^|\\s)(\\d{5,15})(?:\\s|$)").matcher(rest);
+        if (bare.find()) {
+            String name = extractBindPlayerName(rest);
+            if (name.isBlank() || !name.equals(bare.group(1)))
+                return bare.group(1);
+        }
+        return "";
+    }
+
+    static String extractBindPlayerName(String rest) {
+        if (rest == null)
+            return "";
+        String text = rest.replaceAll("(?i)\\[CQ:at,[^\\]]*\\]", " ")
+                .replaceAll("(?i)@\\d{5,15}\\b", " ")
+                .replaceAll("(?i)\\b\\d{5,15}\\b", " ")
+                .replaceAll("(?i)\\b(查询|query|列表|list|全部|all)\\b", " ")
+                .trim();
+        if (text.isBlank())
+            return "";
+        String[] parts = text.split("\\s+");
+        return parts[parts.length - 1].trim();
+    }
+
+    static String extractFirstAtQq(String content, List<QQMessageSegment> segments) {
+        if (segments != null) {
+            for (QQMessageSegment segment : segments) {
+                if (segment == null || !"at".equalsIgnoreCase(segment.type()))
+                    continue;
+                String qq = firstNonBlank(segment.value("qq"), segment.value("user_id"));
+                if (qq.matches("\\d{5,15}"))
+                    return qq;
+            }
+        }
+        if (content == null)
+            return "";
+        Matcher matcher = Pattern.compile("(?i)\\[CQ:at,qq=(\\d{5,15})").matcher(content);
+        return matcher.find() ? matcher.group(1) : "";
+    }
+
+    static boolean isValidPlayerName(String name, String pattern) {
+        if (name == null || name.isBlank() || name.length() > 16)
+            return false;
+        String regex = (pattern == null || pattern.isBlank()) ? "^[A-Za-z0-9_]{1,16}$" : pattern;
+        try {
+            return name.matches(regex);
+        } catch (Exception ex) {
+            return name.matches("^[A-Za-z0-9_]{1,16}$");
+        }
+    }
+
+    static String formatRelayNameText(String groupLabel, String cardOrNick, String boundName) {
+        String who;
+        String card = cardOrNick == null ? "" : cardOrNick.trim();
+        String bound = boundName == null ? "" : boundName.trim();
+        if (bound.isBlank())
+            who = card;
+        else if (card.isBlank() || card.equalsIgnoreCase(bound))
+            who = bound;
+        else
+            who = card + "(" + bound + ")";
+        if (who.isBlank())
+            who = "QQ";
+        String label = groupLabel == null ? "" : groupLabel.trim();
+        return label.isBlank() ? who + ": " : "[" + label + "] " + who + ": ";
+    }
+
+    List<String> buildRelayPrefixComponents(String group, String displayName, PlayerBind bind) {
+        List<String> components = new ArrayList<>();
+        String headUrl = bind == null ? "" : resolveBoundHeadUrl(bind);
+        if (!headUrl.isBlank())
+            components.addAll(renderMinecraftImageComponents("●", headUrl));
+        String label = config.groupLabel(group);
+        String boundName = bind == null ? "" : bind.name;
+        String nameText = formatRelayNameText(label, displayName, boundName);
+        nameText = truncate(nameText, 96);
+        if (bind == null)
+            components.add(minecraftTextComponent(nameText, "green"));
+        else
+            components.add(minecraftHoverTextComponent(nameText, "aqua",
+                    "游戏ID：" + bind.name + "\\nQQ群名片：" + (displayName == null ? "" : displayName)));
+        return components;
+    }
+
+    String formatRelayAtLabel(String qq) {
+        if (qq == null || qq.isBlank() || qq.equalsIgnoreCase("all"))
+            return "@" + (qq == null || qq.isBlank() ? "未知" : qq);
+        PlayerBind bind = findBindByQq(qq);
+        return bind == null ? "@" + qq : "@" + bind.name;
+    }
+
+    String resolveBoundHeadUrl(PlayerBind bind) {
+        if (bind == null || !config.playerBind.showSkinHead || bind.uuid == null || bind.uuid.isBlank())
+            return "";
+        String cached = playerHeadUrlCache.get(bind.uuid.toLowerCase(java.util.Locale.ROOT));
+        if (cached != null)
+            return cached;
+        if (!config.imageHost.enabled)
+            return "";
+        String token = resolveImageHostToken();
+        if (token.isBlank())
+            return "";
+        try {
+            if (bind.name != null && !bind.name.isBlank())
+                syncPlayerSkinAssets(bind.name, bind.uuid, null);
+            Path head = firstExistingPlayerHead(bind.uuid);
+            if (head == null || !Files.isRegularFile(head))
+                return "";
+            byte[] bytes = Files.readAllBytes(head);
+            if (bytes.length < 80)
+                return "";
+            ImageHostUploadResult uploaded = uploadToImageHost(bytes,
+                    "head-" + bind.uuid.toLowerCase(java.util.Locale.ROOT) + ".png", token);
+            if (!uploaded.ok || uploaded.name.isBlank())
+                return "";
+            String url = imageHostObjectUrl(uploaded.name);
+            if (safeRelayUrl(url).isBlank())
+                return "";
+            playerHeadUrlCache.put(bind.uuid.toLowerCase(java.util.Locale.ROOT), url);
+            return url;
+        } catch (Exception ex) {
+            log("绑定头像准备失败 " + bind.name + "：" + messageOf(ex));
+            return "";
+        }
+    }
+
+    Path firstExistingPlayerHead(String uuid) {
+        if (uuid == null || uuid.isBlank())
+            return null;
+        String id = uuid.toLowerCase(java.util.Locale.ROOT);
+        List<String> maps = listBlueMapMapIds();
+        if (maps.isEmpty())
+            maps = List.of("world");
+        for (String map : maps) {
+            Path head = root.resolve("bluemap").resolve("web").resolve("maps").resolve(map)
+                    .resolve("assets").resolve("playerheads").resolve(id + ".png");
+            if (Files.isRegularFile(head))
+                return head;
+        }
+        return null;
+    }
+
+    void warmupBoundSkin(PlayerBind bind) {
+        if (bind == null || bind.name == null || bind.name.isBlank())
+            return;
+        qqChatRelayExecutor.execute(() -> {
+            try {
+                syncPlayerSkinAssets(bind.name, bind.uuid, null);
+                resolveBoundHeadUrl(bind);
+            } catch (Exception ex) {
+                log("绑定后预热皮肤失败 " + bind.name + "：" + messageOf(ex));
+            }
+        });
+    }
+
+    PlayerBind findBindByQq(String qq) {
+        if (qq == null || qq.isBlank())
+            return null;
+        return playerBindsByQq.get(qq.trim());
+    }
+
+    PlayerBind findBindByName(String name) {
+        if (name == null || name.isBlank())
+            return null;
+        return playerBindsByName.get(name.trim().toLowerCase(java.util.Locale.ROOT));
+    }
+
+    List<PlayerBind> listPlayerBinds() {
+        List<PlayerBind> all = new ArrayList<>(playerBindsByQq.values());
+        all.sort((a, b) -> Long.compare(a.boundAt, b.boundAt));
+        return all;
+    }
+
+    boolean savePlayerBind(PlayerBind bind) {
+        if (bind == null || bind.qq.isBlank() || bind.name.isBlank())
+            return false;
+        synchronized (playerBindLock) {
+            PlayerBind old = playerBindsByQq.get(bind.qq);
+            if (old != null)
+                playerBindsByName.remove(old.name.toLowerCase(java.util.Locale.ROOT));
+            playerBindsByQq.put(bind.qq, bind);
+            playerBindsByName.put(bind.name.toLowerCase(java.util.Locale.ROOT), bind);
+            return writePlayerBindsUnlocked();
+        }
+    }
+
+    boolean removePlayerBind(String qq) {
+        if (qq == null || qq.isBlank())
+            return false;
+        synchronized (playerBindLock) {
+            PlayerBind old = playerBindsByQq.remove(qq.trim());
+            if (old != null)
+                playerBindsByName.remove(old.name.toLowerCase(java.util.Locale.ROOT));
+            return old != null && writePlayerBindsUnlocked();
+        }
+    }
+
+    void loadPlayerBinds() {
+        Path file = playerBindStorePath();
+        if (!Files.isRegularFile(file))
+            return;
+        try {
+            String raw = Files.readString(file, StandardCharsets.UTF_8);
+            List<PlayerBind> loaded = parsePlayerBinds(raw);
+            synchronized (playerBindLock) {
+                playerBindsByQq.clear();
+                playerBindsByName.clear();
+                for (PlayerBind bind : loaded) {
+                    playerBindsByQq.put(bind.qq, bind);
+                    playerBindsByName.put(bind.name.toLowerCase(java.util.Locale.ROOT), bind);
+                }
+            }
+            log("已加载 QQ-游戏ID 绑定 " + loaded.size() + " 条：" + file.getFileName());
+        } catch (Exception ex) {
+            log("读取绑定文件失败：" + messageOf(ex));
+        }
+    }
+
+    boolean writePlayerBindsUnlocked() {
+        Path file = playerBindStorePath();
+        try {
+            Files.createDirectories(file.getParent());
+            Path tmp = file.resolveSibling(file.getFileName().toString() + ".tmp");
+            Files.writeString(tmp, serializePlayerBinds(listPlayerBinds()), StandardCharsets.UTF_8);
+            try {
+                Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (IOException ex) {
+                Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            return true;
+        } catch (Exception ex) {
+            log("写入绑定文件失败：" + messageOf(ex));
+            return false;
+        }
+    }
+
+    Path playerBindStorePath() {
+        String store = config.playerBind.store;
+        if (store == null || store.isBlank())
+            store = "logs/qq-player-binds.json";
+        Path path = Path.of(store);
+        return path.isAbsolute() ? path : root.resolve(store);
+    }
+
+    static List<PlayerBind> parsePlayerBinds(String raw) {
+        List<PlayerBind> out = new ArrayList<>();
+        if (raw == null || raw.isBlank())
+            return out;
+        String array = jsonArray(raw, "bindings");
+        if (array.isBlank())
+            array = raw;
+        Set<String> seenQq = new HashSet<>();
+        Set<String> seenName = new HashSet<>();
+        for (String node : topLevelObjects(array)) {
+            String qq = firstNonBlank(jsonString(node, "qq"), jsonNumber(node, "qq"));
+            String name = jsonString(node, "name");
+            String uuid = jsonString(node, "uuid");
+            if (qq.isBlank() || !qq.matches("\\d{5,15}") || !isValidPlayerName(name, ""))
+                continue;
+            if (!seenQq.add(qq) || !seenName.add(name.toLowerCase(java.util.Locale.ROOT)))
+                continue;
+            long boundAt = jsonLong(node, "boundAt", 0L);
+            String boundBy = firstNonBlank(jsonString(node, "boundBy"), jsonNumber(node, "boundBy"), qq);
+            if (uuid.isBlank())
+                uuid = offlinePlayerUuid(name);
+            out.add(new PlayerBind(qq, name, uuid, boundAt, boundBy));
+        }
+        return out;
+    }
+
+    static String serializePlayerBinds(List<PlayerBind> binds) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\n  \"updatedAt\": ").append(System.currentTimeMillis())
+                .append(",\n  \"bindings\": [");
+        if (binds != null) {
+            boolean first = true;
+            for (PlayerBind bind : binds) {
+                if (!first)
+                    sb.append(',');
+                first = false;
+                sb.append("\n    {\"qq\":\"").append(jsonEscape(bind.qq))
+                        .append("\",\"name\":\"").append(jsonEscape(bind.name))
+                        .append("\",\"uuid\":\"").append(jsonEscape(bind.uuid))
+                        .append("\",\"boundAt\":").append(bind.boundAt)
+                        .append(",\"boundBy\":\"").append(jsonEscape(bind.boundBy))
+                        .append("\"}");
+            }
+            if (!first)
+                sb.append('\n');
+        }
+        sb.append("  ]\n}\n");
+        return sb.toString();
+    }
+
+    CachedPlayer lookupUsercache(String name) {
+        if (name == null || name.isBlank())
+            return null;
+        String want = name.trim();
+        for (CachedPlayer player : loadUsercacheSnapshot()) {
+            if (player.name.equalsIgnoreCase(want))
+                return player;
+        }
+        return null;
+    }
+
+    List<CachedPlayer> loadUsercacheSnapshot() {
+        long now = System.currentTimeMillis();
+        List<CachedPlayer> cached = usercacheSnapshot;
+        if (now - usercacheLoadedAt < 15_000L && cached != null)
+            return cached;
+        List<CachedPlayer> list = new ArrayList<>();
+        Path cache = root.resolve("usercache.json");
+        if (Files.isRegularFile(cache)) {
+            try {
+                String raw = Files.readString(cache, StandardCharsets.UTF_8);
+                Set<String> seen = new HashSet<>();
+                Matcher obj = Pattern.compile("\\{[^{}]*\\}").matcher(raw);
+                while (obj.find()) {
+                    String block = obj.group();
+                    Matcher nm = Pattern.compile("\"name\"\\s*:\\s*\"([A-Za-z0-9_]{1,16})\"").matcher(block);
+                    Matcher um = Pattern.compile("\"uuid\"\\s*:\\s*\"([0-9a-fA-F-]{32,36})\"").matcher(block);
+                    if (!nm.find() || !um.find())
+                        continue;
+                    String playerName = nm.group(1);
+                    String key = playerName.toLowerCase(java.util.Locale.ROOT);
+                    if (!seen.add(key))
+                        continue;
+                    list.add(new CachedPlayer(playerName, um.group(1).toLowerCase(java.util.Locale.ROOT)));
+                }
+            } catch (Exception ex) {
+                log("读取 usercache.json 失败：" + messageOf(ex));
+            }
+        }
+        usercacheSnapshot = list;
+        usercacheLoadedAt = now;
+        return list;
+    }
+
+    static String offlinePlayerUuid(String name) {
+        return java.util.UUID.nameUUIDFromBytes(
+                ("OfflinePlayer:" + (name == null ? "" : name)).getBytes(StandardCharsets.UTF_8)).toString();
+    }
+
+    static String minecraftHoverTextComponent(String text, String color, String hover) {
+        return "{\"text\":\"" + jsonEscapeAscii(text == null ? "" : text)
+                + "\",\"color\":\"" + (color == null || color.isBlank() ? "white" : color) + "\""
+                + ",\"hoverEvent\":{\"action\":\"show_text\",\"contents\":\""
+                + jsonEscapeAscii(hover == null ? "" : hover) + "\"}}";
+    }
+
+    static void runPlayerBindSelftest(Path root) {
+        int failed = 0;
+        failed += assertBind("name-ok", isValidPlayerName("Steve", ""), true);
+        failed += assertBind("name-underscore", isValidPlayerName("_30", ""), true);
+        failed += assertBind("name-bad", isValidPlayerName("中文ID", ""), false);
+        failed += assertBind("extract-name", extractBindPlayerName("[CQ:at,qq=123456] Steve").equals("Steve"), true);
+        String prefix = formatRelayNameText("0号Q群", "群名片", "Steve");
+        failed += assertBind("prefix-bound", prefix.equals("[0号Q群] 群名片(Steve): "), true);
+        failed += assertBind("prefix-same", formatRelayNameText("0号Q群", "Steve", "Steve")
+                .equals("[0号Q群] Steve: "), true);
+        failed += assertBind("prefix-unbound", formatRelayNameText("0号Q群", "群名片", "")
+                .equals("[0号Q群] 群名片: "), true);
+        List<PlayerBind> parsed = parsePlayerBinds("{\"bindings\":[{\"qq\":\"123456\",\"name\":\"Steve\","
+                + "\"uuid\":\"11111111-1111-1111-1111-111111111111\",\"boundAt\":1,\"boundBy\":\"123456\"}]}");
+        failed += assertBind("parse-one", parsed.size() == 1 && parsed.get(0).name.equals("Steve"), true);
+        String json = serializePlayerBinds(parsed);
+        failed += assertBind("roundtrip", parsePlayerBinds(json).size() == 1, true);
+        Path tmp = root.resolve("tmp").resolve("qq-player-bind-selftest.json");
+        try {
+            Files.createDirectories(tmp.getParent());
+            Files.writeString(tmp, json, StandardCharsets.UTF_8);
+            failed += assertBind("write-tmp", Files.size(tmp) > 10, true);
+        } catch (Exception ex) {
+            System.out.println("FAIL write-tmp " + ex.getMessage());
+            failed++;
+        }
+        if (failed == 0)
+            System.out.println("PASS player-bind selftest");
+        else {
+            System.out.println("FAIL player-bind selftest: " + failed);
+            System.exit(1);
+        }
+    }
+
+    static int assertBind(String name, boolean ok, boolean expected) {
+        if (ok == expected)
+            return 0;
+        System.out.println("FAIL " + name);
+        return 1;
     }
 
     List<QQMessageSegment> prepareRelaySegments(List<QQMessageSegment> segments) {
@@ -2506,9 +3143,16 @@ public class QQConsoleBridge {
     }
 
     String renderMinecraftTellraw(String prefix, List<QQMessageSegment> segments) {
-        List<String> components = new ArrayList<>();
+        List<String> prefixComponents = new ArrayList<>();
         if (prefix != null && !prefix.isBlank())
-            components.add(minecraftTextComponent(prefix, "green"));
+            prefixComponents.add(minecraftTextComponent(prefix, "green"));
+        return renderMinecraftTellraw(prefixComponents, segments);
+    }
+
+    String renderMinecraftTellraw(List<String> prefixComponents, List<QQMessageSegment> segments) {
+        List<String> components = new ArrayList<>();
+        if (prefixComponents != null)
+            components.addAll(prefixComponents);
         int textBudget = 220;
         int count = 0;
         for (QQMessageSegment segment : segments) {
@@ -2542,8 +3186,8 @@ public class QQConsoleBridge {
                     components.add(minecraftTextComponent(
                             face.isBlank() ? "[表情]" : "[表情:" + face + "]", "aqua"));
                 }
-                case "at" -> components.add(minecraftTextComponent("@"
-                        + firstNonBlank(segment.value("qq"), segment.value("user_id"), "未知"), "yellow"));
+                case "at" -> components.add(minecraftTextComponent(
+                        formatRelayAtLabel(firstNonBlank(segment.value("qq"), segment.value("user_id"))), "yellow"));
                 case "reply" -> components.add(minecraftTextComponent("[回复]", "gray"));
                 case "record", "audio" -> components.add(minecraftTextComponent("[语音]", "aqua"));
                 case "video" -> components.add(minecraftTextComponent("[视频]", "aqua"));
@@ -10862,6 +11506,7 @@ public class QQConsoleBridge {
         return "客群实验功能\n"
                 + "@我 <问题> / " + p + "问 <问题>  AI 问答\n"
                 + p + "wiki 模组名  查询模组资料\n"
+                + p + "绑定 游戏ID  把 QQ 绑到游戏角色\n"
                 + "引用图片或表情后 " + p + "转图床\n"
                 + p + "ai  查看 AI 状态\n"
                 + p + "help  查看本说明";
@@ -10878,6 +11523,7 @@ public class QQConsoleBridge {
                 .append(p).append("更新     最近模组变更\n")
                 .append(p).append("ip / ").append(p).append("ping / ").append(p).append("uptime\n")
                 .append(p).append("ai       当前 AI 状态\n")
+                .append(p).append("绑定 游戏ID  群消息进游戏显示ID\n")
                 .append("引用图/表情 ").append(p).append("转图床");
         if (privileged) {
             out.append("\n\n管理：")
@@ -10899,6 +11545,7 @@ public class QQConsoleBridge {
                 + p + "地图时光机   BlueMap 快照\n"
                 + p + "backup [force] / " + p + "save / " + p + "验备份\n"
                 + p + "模组进度 / " + p + "取消升级模组\n"
+                + p + "绑定 @QQ 游戏ID / " + p + "绑定列表\n"
                 + p + "seed / " + p + "weather 晴|雨|雷\n"
                 + p + "取消确认     作废确认码";
     }
@@ -10908,6 +11555,7 @@ public class QQConsoleBridge {
         out.append("\n\n较少用：")
                 .append(p).append("规则  ").append(p).append("版本  ").append(p).append("day\n")
                 .append(p).append("自助修复  ").append(p).append("roll  ").append(p).append("运势  ").append(p).append("id\n")
+                .append(p).append("解绑 / ").append(p).append("绑定查询\n")
                 .append("引用图/表情包后 ").append(p).append("转图床 / ").append(p).append("上传图床（静图和 GIF 都行）");
         if (privileged)
             out.append("\n\n").append(formatHelpOps(p));
@@ -12341,6 +12989,25 @@ public class QQConsoleBridge {
     record RelayImageCacheEntry(String url, long expiresAtMs) {
     }
 
+    record CachedPlayer(String name, String uuid) {
+    }
+
+    static final class PlayerBind {
+        final String qq;
+        final String name;
+        final String uuid;
+        final long boundAt;
+        final String boundBy;
+
+        PlayerBind(String qq, String name, String uuid, long boundAt, String boundBy) {
+            this.qq = qq == null ? "" : qq.trim();
+            this.name = name == null ? "" : name.trim();
+            this.uuid = uuid == null ? "" : uuid.trim();
+            this.boundAt = boundAt;
+            this.boundBy = boundBy == null || boundBy.isBlank() ? this.qq : boundBy.trim();
+        }
+    }
+
     record QuotedReleaseFile(String fileId, String fileName, long size, String originalUserId,
             String quotedMessageId) {
     }
@@ -13034,6 +13701,16 @@ public class QQConsoleBridge {
         int port = 38080;
     }
 
+    static class PlayerBindConfig {
+        boolean enabled = true;
+        boolean memberAccess = true;
+        boolean requireSeenOnServer = true;
+        boolean showSkinHead = true;
+        int maxPerQq = 1;
+        String namePattern = "^[A-Za-z0-9_]{1,16}$";
+        String store = "logs/qq-player-binds.json";
+    }
+
     static class QQConfig {
         boolean enabled = false;
         String onebotUrl = "http://127.0.0.1:3001";
@@ -13070,6 +13747,7 @@ public class QQConsoleBridge {
         Set<String> modReleaseTriggerIds = new HashSet<>();
         AiConfig ai = new AiConfig();
         ImageHostConfig imageHost = new ImageHostConfig();
+        PlayerBindConfig playerBind = new PlayerBindConfig();
         // 高危操作确认 + 审计（根级 riskConfirm / 也可写在 qq 段）
         boolean riskConfirmEnabled = true;
         int riskConfirmTtlSeconds = 90;
@@ -13411,6 +14089,26 @@ public class QQConsoleBridge {
                 if (!ihRoot.isBlank())
                     c.imageHost.root = ihRoot.trim();
                 c.imageHost.port = jsonInt(ihJson, "port", c.imageHost.port);
+            }
+            String bindJson = jsonObject(qq, "playerBind");
+            if (bindJson.isBlank())
+                bindJson = jsonObject(json, "playerBind");
+            if (!bindJson.isBlank()) {
+                if (bindJson.contains("\"enabled\""))
+                    c.playerBind.enabled = jsonBoolean(bindJson, "enabled");
+                if (bindJson.contains("\"memberAccess\""))
+                    c.playerBind.memberAccess = jsonBoolean(bindJson, "memberAccess");
+                if (bindJson.contains("\"requireSeenOnServer\""))
+                    c.playerBind.requireSeenOnServer = jsonBoolean(bindJson, "requireSeenOnServer");
+                if (bindJson.contains("\"showSkinHead\""))
+                    c.playerBind.showSkinHead = jsonBoolean(bindJson, "showSkinHead");
+                c.playerBind.maxPerQq = jsonInt(bindJson, "maxPerQq", c.playerBind.maxPerQq);
+                String pattern = jsonString(bindJson, "namePattern");
+                if (!pattern.isBlank())
+                    c.playerBind.namePattern = pattern.trim();
+                String store = jsonString(bindJson, "store");
+                if (!store.isBlank())
+                    c.playerBind.store = store.trim();
             }
             return c;
         }

@@ -70,6 +70,7 @@
 - RCON 命令、备份、存盘、天气、种子、在线列表和 TPS 查询
 - 高危操作确认码、审计记录和重复操作保护
 - 可选 AI 运维助手：读取日志、崩溃报告、模组列表、配置和性能信息，帮助定位问题
+- QQ ↔ 游戏 ID 绑定：成员自助绑定/查询/解绑，管理员代绑与列表，公屏按绑定 ID 显示；头像预览可选
 - 可选 DDNS、QQ 图片/表情包自动转存图床并转发到 Minecraft、模组发布事务和摄像机视角能力
 
 #### QQ 图片与表情包的游戏内预览
@@ -81,6 +82,18 @@
 ![QQ 表情包的 ChatImage 游戏内预览实测](docs/assets/qq-chatimage-sticker-preview.png)
 
 自动转存、手动 `!转图床`、地址分工、ChatImage 悬停预览和故障排查见[QQ 图片转图床说明](docs/qq-image-host-转图床.md)。
+
+#### QQ 游戏 ID 绑定
+
+QQ 桥可以把成员 QQ 号与本服游戏 ID 绑定。普通成员在群里发 `!绑定 游戏ID` 即可自助绑定、查询和解绑，管理员可代绑或查看列表。绑定之后，主群消息转发到 Minecraft 公屏会同时显示群名片和游戏 ID；安装 ChatImage 后，把鼠标放到名字前的 `●` 上还能看到该角色的皮肤头像。
+
+下面是 NeoForge 1.21.1 / 21.1.235 实服的真实效果。QQ 侧头像和群名已打码，截图只保留能力验证所需的命令与公屏效果：
+
+![QQ 群里绑定游戏 ID](docs/assets/qq-player-bind-qq-command.jpg)
+
+![游戏公屏显示绑定 ID 并悬停预览皮肤头像](docs/assets/qq-player-bind-minecraft-preview.png)
+
+命令、权限、配置和离线自测见[QQ 号与游戏 ID 绑定](docs/qq-player-bind-游戏ID绑定.md)。
 
 QQ 与 Minecraft 的实际双向消息链路如下：
 
