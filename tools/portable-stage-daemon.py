@@ -33,7 +33,8 @@ _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 urllib.request.install_opener(_DIRECT_OPENER)
 _STAGE_UA = "portable-server-kit-stage/1.0"
 _OFFICIAL_TIMEOUT_SEC = 8
-_OFFICIAL_MIN_BYTES = 256 * 1024
+_OFFICIAL_MIN_BYTES = 1024 * 1024
+_OFFICIAL_MIN_RATE = 128 * 1024
 _PROXY_URL = None
 _PROXY_OPENER = None
 _OFFICIAL_SKIP = False
@@ -47,12 +48,6 @@ _PRIMARY_UPDATE_URL_FILES = (
     "TFCR-update-url.txt",
     "_updater/UPDATE-URL.txt",
     "_updater/PORTABLE-UPDATE-URL.txt",
-)
-_FALLBACK_UPDATE_URL_FILES = (
-    "UPDATE-URL-LAN.txt",
-    "PORTABLE-UPDATE-URL-LAN.txt",
-    "_updater/UPDATE-URL-LAN.txt",
-    "_updater/PORTABLE-UPDATE-URL-LAN.txt",
 )
 
 
@@ -90,7 +85,7 @@ def read_update_urls(root: pathlib.Path, override: str) -> list:
         return [override.strip()]
     urls = []
     seen = set()
-    for rel in _PRIMARY_UPDATE_URL_FILES + _FALLBACK_UPDATE_URL_FILES:
+    for rel in _PRIMARY_UPDATE_URL_FILES:
         p = root.joinpath(*rel.split("/"))
         if not p.is_file():
             continue
@@ -129,17 +124,38 @@ def is_private_update_url(url: str) -> bool:
         return False
 
 
-def order_update_urls(urls: list) -> list:
-    private = [url for url in urls if is_private_update_url(url)]
-    public = [url for url in urls if not is_private_update_url(url)]
-    return private + public
+def order_update_urls(urls: list, last_good: str = "") -> list:
+    seen = set()
+    out = []
+
+    def add(url):
+        key = str(url or "").strip()
+        if not key:
+            return
+        low = key.lower()
+        if low in seen:
+            return
+        seen.add(low)
+        out.append(key)
+
+    public = [url for url in (urls or []) if not is_private_update_url(url)]
+    candidates = public or list(urls or [])
+    if last_good and not is_private_update_url(last_good):
+        add(last_good)
+    for url in candidates:
+        add(url)
+    return out
+
+
+def probe_timeout_for_url(url: str) -> float:
+    return 8
 
 
 def probe_manifest_url(url: str) -> bool:
     """Probe once and require a JSON manifest before starting a long-lived daemon."""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _STAGE_UA, "Cache-Control": "no-cache"})
-        with _DIRECT_OPENER.open(req, timeout=8) as resp:
+        with _DIRECT_OPENER.open(req, timeout=probe_timeout_for_url(url)) as resp:
             if getattr(resp, "status", 200) != 200:
                 return False
             payload = resp.read()
@@ -296,23 +312,29 @@ def official_opener_for(url: str):
     return _PROXY_OPENER
 
 
-def copy_response(resp, out, timeout: int, min_bytes_after_timeout: int = 0):
+def copy_response(resp, out, timeout: int, min_bytes_after_timeout: int = 0, min_rate_bps: int = 0):
     started = time.time()
     got = 0
-    checked_slow = False
+    next_check = float(timeout or 0)
     while True:
         chunk = resp.read(64 * 1024)
         if not chunk:
             break
         out.write(chunk)
         got += len(chunk)
-        if min_bytes_after_timeout and not checked_slow and (time.time() - started) >= timeout:
-            if got < min_bytes_after_timeout:
-                raise TimeoutError("official source too slow")
-            checked_slow = True
+        if next_check <= 0:
+            continue
+        elapsed = time.time() - started
+        if elapsed < next_check:
+            continue
+        if min_rate_bps and got < min_rate_bps * elapsed:
+            raise TimeoutError("official source too slow")
+        if min_bytes_after_timeout and got < min_bytes_after_timeout:
+            raise TimeoutError("official source too slow")
+        next_check = elapsed + max(1.0, float(timeout))
 
 
-def download_verify(url: str, dest: pathlib.Path, expected: str, opener=None, timeout=120, min_bytes_after_timeout=0):
+def download_verify(url: str, dest: pathlib.Path, expected: str, opener=None, timeout=120, min_bytes_after_timeout=0, min_rate_bps=0):
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix="portable-stage-", suffix=".tmp")
     os.close(fd)
@@ -321,7 +343,7 @@ def download_verify(url: str, dest: pathlib.Path, expected: str, opener=None, ti
     req = urllib.request.Request(url, headers={"User-Agent": _STAGE_UA})
     try:
         with opener.open(req, timeout=timeout) as resp, tmp.open("wb") as out:
-            copy_response(resp, out, timeout, min_bytes_after_timeout)
+            copy_response(resp, out, timeout, min_bytes_after_timeout, min_rate_bps)
         actual = sha1(tmp)
         if actual != expected.lower():
             raise RuntimeError(f"SHA1 mismatch expected={expected} actual={actual}")
@@ -357,6 +379,7 @@ def download_staged_entry(item, base: str, dest: pathlib.Path, expected: str, re
                 opener=official_opener_for(url),
                 timeout=_OFFICIAL_TIMEOUT_SEC,
                 min_bytes_after_timeout=_OFFICIAL_MIN_BYTES,
+                min_rate_bps=_OFFICIAL_MIN_RATE,
             )
             return "official"
         except Exception as exc:
@@ -632,7 +655,15 @@ def main() -> int:
     if not manifest_urls:
         log(log_path, "未找到 UPDATE-URL，暂存 daemon 退出。")
         return 0
-    manifest_urls = order_update_urls(manifest_urls)
+    last_good = ""
+    state_file = instance_root / ".portable-sync-state.json"
+    if state_file.is_file():
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8-sig"))
+            last_good = str(state.get("lastManifestUrl") or state.get("manifestUrl") or "")
+        except Exception:
+            last_good = ""
+    manifest_urls = order_update_urls(manifest_urls, last_good)
     manifest_url = ""
     selected_index = -1
     for index, candidate in enumerate(manifest_urls):
@@ -644,7 +675,7 @@ def main() -> int:
         log(log_path, "更新源暂时不可达，暂存 daemon 本轮不启动；下次玩家同步会重试。")
         return 0
     if selected_index > 0:
-        log(log_path, "已切换到备用更新地址（通常是局域网地址）。")
+        log(log_path, "已切换到备用更新地址。")
     run_watch(instance_root, stage_root, ready_path, notice_path, lock_path, log_path,
               manifest_url, args.interval_seconds, args.max_runtime_minutes,
               args.grace_minutes, args.idle_exit_checks)

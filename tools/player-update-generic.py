@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import concurrent.futures
 import datetime as dt
 import fnmatch
 import hashlib
@@ -13,6 +14,7 @@ import socket
 import struct
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -26,16 +28,22 @@ _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 urllib.request.install_opener(_DIRECT_OPENER)
 _SYNC_UA = "portable-server-kit-sync/1.0"
 _OFFICIAL_TIMEOUT_SEC = 8
-# 官方源 8 秒内拿不到这么多字节，视为「能通但太慢」，立刻回落家宽。
-# 纯空闲超时拦不住国内直连那种 10~30 KB/s 的细水长流。
-_OFFICIAL_MIN_BYTES = 256 * 1024
+# 官方源按速率判断，不是「8 秒内凑够一点点就算成功」。
+# 旧门槛 256KB/8s = 32KB/s，70MB 模组会细水长流半小时还不回落。
+_OFFICIAL_MIN_BYTES = 1024 * 1024
+_OFFICIAL_MIN_RATE = 128 * 1024
+_PRIVATE_PROBE_TIMEOUT_SEC = 1.2
+_PUBLIC_PROBE_TIMEOUT_SEC = 8
+_DOWNLOAD_WORKERS = 4
+_PRINT_LOCK = threading.Lock()
+_OFFICIAL_LOCK = threading.Lock()
 _PROXY_URL = None
 _PROXY_OPENER = None
 _OFFICIAL_SKIP = False
 _OFFICIAL_SKIP_NOTIFIED = False
 
 
-def fetch_bytes(url: str, timeout: int = 20) -> bytes:
+def fetch_bytes(url: str, timeout: float = 20) -> bytes:
     """直连下载。优先 IPv4，避免 macOS 先卡在不通的 AAAA 上直到超时。"""
     req = urllib.request.Request(url, headers={"User-Agent": _SYNC_UA})
     parsed = urllib.parse.urlparse(url)
@@ -111,12 +119,6 @@ _PRIMARY_UPDATE_URL_FILES = (
     "_updater/UPDATE-URL.txt",
     "_updater/PORTABLE-UPDATE-URL.txt",
 )
-_FALLBACK_UPDATE_URL_FILES = (
-    "UPDATE-URL-LAN.txt",
-    "PORTABLE-UPDATE-URL-LAN.txt",
-    "_updater/UPDATE-URL-LAN.txt",
-    "_updater/PORTABLE-UPDATE-URL-LAN.txt",
-)
 
 
 def _url_lines(raw: str) -> list:
@@ -130,12 +132,12 @@ def _url_lines(raw: str) -> list:
 
 
 def read_update_urls(root: pathlib.Path, override: str) -> list:
-    """Return the primary update URL plus optional LAN fallback URLs."""
+    """Return the public update URL from the pack. Do not auto-probe LAN."""
     raw_values = []
     if override:
         raw_values.extend(_url_lines(override))
     else:
-        for rel in _PRIMARY_UPDATE_URL_FILES + _FALLBACK_UPDATE_URL_FILES:
+        for rel in _PRIMARY_UPDATE_URL_FILES:
             p = root.joinpath(*rel.split("/"))
             if p.is_file():
                 try:
@@ -321,6 +323,93 @@ def is_local_or_private_host(host: str) -> bool:
     return False
 
 
+def is_private_update_url(url: str) -> bool:
+    return is_local_or_private_host(urllib.parse.urlparse(str(url) or "").hostname or "")
+
+
+def probe_timeout_for_url(url: str) -> float:
+    host = urllib.parse.urlparse(str(url) or "").hostname or ""
+    return _PRIVATE_PROBE_TIMEOUT_SEC if is_local_or_private_host(host) else _PUBLIC_PROBE_TIMEOUT_SEC
+
+
+def order_manifest_urls(urls, last_good: str = "") -> list:
+    """Public addresses only. Never auto-insert a LAN IP for WAN players."""
+    seen = set()
+    out = []
+
+    def add(url):
+        key = str(url or "").strip()
+        if not key:
+            return
+        low = key.lower()
+        if low in seen:
+            return
+        seen.add(low)
+        out.append(key)
+
+    public = [url for url in (urls or []) if not is_private_update_url(url)]
+    # 玩家自己把 UPDATE-URL 写成局域网地址时保留；自动探测产生的 192.168 一律丢掉。
+    candidates = public or list(urls or [])
+    if last_good and not is_private_update_url(last_good):
+        add(last_good)
+    for url in candidates:
+        add(url)
+    return out
+
+
+def file_verify_record(path: pathlib.Path, digest: str) -> dict:
+    st = path.stat()
+    return {"sha1": str(digest).lower(), "size": int(st.st_size), "mtime": int(st.st_mtime)}
+
+
+def looks_like_current_file(path: pathlib.Path, expected: str, manifest_size, previous_hash: str, verified=None) -> bool:
+    """Skip SHA1 when last completed sync already proved this exact file."""
+    if not path.is_file() or not expected:
+        return False
+    size = path.stat().st_size
+    if manifest_size not in (None, "", 0, "0"):
+        try:
+            if size != int(manifest_size):
+                return False
+        except (TypeError, ValueError):
+            pass
+    expected = str(expected).lower()
+    previous_hash = str(previous_hash or "").lower()
+    verified = verified or {}
+    v_sha = str(verified.get("sha1") or "").lower()
+    if previous_hash == expected:
+        if v_sha == expected:
+            try:
+                if int(verified.get("size", -1)) == size and int(verified.get("mtime", -1)) == int(path.stat().st_mtime):
+                    return True
+            except (TypeError, ValueError):
+                pass
+            return sha1(path) == expected
+        return True
+    if v_sha == expected:
+        try:
+            if int(verified.get("size", -1)) == size and int(verified.get("mtime", -1)) == int(path.stat().st_mtime):
+                return True
+        except (TypeError, ValueError):
+            pass
+    return sha1(path) == expected
+
+
+def home_timeout_sec(size=0) -> int:
+    try:
+        size = int(size or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if size <= 0:
+        return 180
+    return max(120, min(300, int(size / (128 * 1024)) + 60))
+
+
+def sync_print(message: str) -> None:
+    with _PRINT_LOCK:
+        print(message)
+
+
 def proxy_bypass_hosts() -> list:
     raw = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
     return [item.strip().lower() for item in raw.split(",") if item.strip()]
@@ -396,23 +485,29 @@ def download_fail_reason(exc: BaseException) -> str:
     return "连接失败"
 
 
-def copy_response(resp, out, timeout: int, min_bytes_after_timeout: int = 0):
+def copy_response(resp, out, timeout: int, min_bytes_after_timeout: int = 0, min_rate_bps: int = 0):
     started = time.time()
     got = 0
-    checked_slow = False
+    next_check = float(timeout or 0)
     while True:
         chunk = resp.read(64 * 1024)
         if not chunk:
             break
         out.write(chunk)
         got += len(chunk)
-        if min_bytes_after_timeout and not checked_slow and (time.time() - started) >= timeout:
-            if got < min_bytes_after_timeout:
-                raise TimeoutError("official source too slow")
-            checked_slow = True
+        if next_check <= 0:
+            continue
+        elapsed = time.time() - started
+        if elapsed < next_check:
+            continue
+        if min_rate_bps and got < min_rate_bps * elapsed:
+            raise TimeoutError("official source too slow")
+        if min_bytes_after_timeout and got < min_bytes_after_timeout:
+            raise TimeoutError("official source too slow")
+        next_check = elapsed + max(1.0, float(timeout))
 
 
-def download_file(url: str, dest: pathlib.Path, expected_sha1: str, opener=None, timeout=60, retries=1, min_bytes_after_timeout=0):
+def download_file(url: str, dest: pathlib.Path, expected_sha1: str, opener=None, timeout=60, retries=1, min_bytes_after_timeout=0, min_rate_bps=0):
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix="portable-sync-", suffix=".tmp")
     os.close(fd)
@@ -424,7 +519,7 @@ def download_file(url: str, dest: pathlib.Path, expected_sha1: str, opener=None,
         for attempt in range(retries + 1):
             try:
                 with opener.open(req, timeout=timeout) as resp, tmp.open("wb") as out:
-                    copy_response(resp, out, timeout, min_bytes_after_timeout)
+                    copy_response(resp, out, timeout, min_bytes_after_timeout, min_rate_bps)
                 last_exc = None
                 break
             except Exception as exc:
@@ -446,15 +541,17 @@ def download_file(url: str, dest: pathlib.Path, expected_sha1: str, opener=None,
 
 def mark_official_skip():
     global _OFFICIAL_SKIP, _OFFICIAL_SKIP_NOTIFIED
-    _OFFICIAL_SKIP = True
-    if not _OFFICIAL_SKIP_NOTIFIED:
+    with _OFFICIAL_LOCK:
+        _OFFICIAL_SKIP = True
+        notify = not _OFFICIAL_SKIP_NOTIFIED
         _OFFICIAL_SKIP_NOTIFIED = True
-        print("[同步] 官方源本轮不再尝试，其余文件直接走更新服务。")
+    if notify:
+        sync_print("[同步] 官方源本轮不再尝试，其余文件直接走更新服务。")
 
 
 def download_manifest_entry(item, base_url: str, dest: pathlib.Path, expected_sha1: str, rel: str) -> str:
     # 官方源：有系统代理就走代理（国内直连 Modrinth 经常能通但很慢）。
-    # 8 秒内字节太少或失败，立刻回落家宽；本轮后面的文件不再试官方，避免 90 次白等。
+    # 按持续速率判断，太慢立刻回落家宽；本轮后面的文件不再试官方，避免 90 次白等。
     # 家宽始终直连，绝不进 Clash。
     urls = [] if _OFFICIAL_SKIP else official_urls(item if isinstance(item, dict) else {})
     for url in urls:
@@ -466,15 +563,22 @@ def download_manifest_entry(item, base_url: str, dest: pathlib.Path, expected_sh
                 timeout=_OFFICIAL_TIMEOUT_SEC,
                 retries=0,
                 min_bytes_after_timeout=_OFFICIAL_MIN_BYTES,
+                min_rate_bps=_OFFICIAL_MIN_RATE,
             )
             return "official"
         except Exception as exc:
-            print(
+            sync_print(
                 f"[同步] 官方源不可用（{time.time() - started:.1f}s，{download_fail_reason(exc)}），改走更新服务：{rel}"
             )
             mark_official_skip()
             break
-    download_file(url_for(base_url, rel), dest, expected_sha1, opener=_DIRECT_OPENER)
+    size = 0
+    if isinstance(item, dict):
+        size = item.get("size") or 0
+    download_file(
+        url_for(base_url, rel), dest, expected_sha1,
+        opener=_DIRECT_OPENER, timeout=home_timeout_sec(size),
+    )
     return "home"
 
 
@@ -872,8 +976,10 @@ def disable_duplicate_mods(root: pathlib.Path, manifest: dict):
     moved = 0
     for jar in sorted(mods.glob("*.jar")):
         rel = jar.relative_to(root).as_posix()
+        if rel.lower() in managed_paths:
+            continue
         digest = sha1(jar)
-        if digest in managed_sha1 and rel.lower() not in managed_paths:
+        if digest in managed_sha1:
             dest = move_to_disabled(jar, disabled)
             moved += 1
             print(f"[修复] 已按 SHA1 归档旧重复 mod：{rel} -> {dest.name}")
@@ -906,30 +1012,35 @@ def main() -> int:
     root.mkdir(parents=True, exist_ok=True)
     reset_download_policy()
     manifest_urls = read_update_urls(root, args.manifest_url)
-    # 同一局域网访问自家公网地址经常没有 NAT 回环；若包内带 LAN 备用地址，
-    # 先试私网地址，外网用户最多付出一次很短的私网探测时间，再回到公网地址。
+    state_path = root / ".portable-sync-state.json"
+    state = {}
+    if state_path.is_file():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            state = {}
+    last_good = "" if args.manifest_url else str(state.get("lastManifestUrl") or "")
     if not args.manifest_url:
-        private_urls = [
-            url for url in manifest_urls
-            if is_local_or_private_host(urllib.parse.urlparse(url).hostname or "")
-        ]
-        manifest_urls = private_urls + [url for url in manifest_urls if url not in private_urls]
+        manifest_urls = order_manifest_urls(manifest_urls, last_good)
     print("[同步] 清单候选：" + "；".join(mask_url(url) for url in manifest_urls))
     proxy = get_proxy_url()
     if proxy:
         print(f"[同步] 已检测到系统代理 {describe_proxy(proxy)}，官方源走代理；家宽更新服务始终直连。")
     else:
-        print("[同步] 未检测到系统代理，官方源直连（国内较慢会在 8 秒内回落更新服务）。")
-    # 更新源重启/隧道瞬断会短暂 503。每个候选只重试一次，避免把一个
-    # 不可达的公网地址重复等很久；成功后本轮所有私有文件都沿用同一地址。
+        print("[同步] 未检测到系统代理，官方源直连（太慢会在约 8 秒内回落更新服务）。")
+        if state.get("skipOfficial"):
+            mark_official_skip()
+            print("[同步] 上次官方源偏慢，本轮直接走更新服务。检测到代理后会再试官方源。")
     manifest = None
     selected_manifest_url = ""
     last_exc = None
     endpoint_errors = []
     for candidate in manifest_urls:
-        for attempt in range(2):
+        timeout = probe_timeout_for_url(candidate)
+        attempts = 1 if timeout <= 2 else 2
+        for attempt in range(attempts):
             try:
-                raw = fetch_bytes(candidate, timeout=8)
+                raw = fetch_bytes(candidate, timeout=timeout)
                 candidate_manifest = json.loads(raw.decode("utf-8-sig"))
                 if not candidate_manifest.get("files"):
                     raise ValueError("manifest 没有 files")
@@ -938,7 +1049,7 @@ def main() -> int:
                 break
             except Exception as exc:
                 last_exc = exc
-                if attempt == 0:
+                if attempt + 1 < attempts:
                     time.sleep(1)
         if manifest is not None:
             break
@@ -960,24 +1071,18 @@ def main() -> int:
     if manifest is None:
         raise SystemExit(
             f"[同步] 清单获取失败：{last_exc}。已尝试 {len(manifest_urls)} 个更新地址。"
-            "若你和服务器在同一局域网，脚本会优先尝试 UPDATE-URL-LAN.txt；仍失败请检查服机局域网地址。"
-            "若在外网，请管理员确认路由器已把 TCP 18088 转到服机，并等 DDNS 生效后再试。"
+            "请确认当前更新地址可达，以及路由器已把更新端口转到服机。"
         )
     manifest_url = selected_manifest_url
-    if manifest_url != manifest_urls[0]:
+    if last_good and manifest_url == last_good:
+        print(f"[同步] 沿用上次可用更新地址：{mask_url(manifest_url)}")
+    elif manifest_url != manifest_urls[0]:
         print(f"[同步] 已切换到可用备用地址：{mask_url(manifest_url)}")
     files = manifest.get("files") or []
     if not files:
         raise SystemExit("清单没有 files 文件列表。")
     base_url = manifest_url.rsplit("/", 1)[0] + "/"
-    state_path = root / ".portable-sync-state.json"
-    state = {}
-    if state_path.is_file():
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-        except Exception:
-            state = {}
-    initial_sync = not bool(state)
+    initial_sync = not bool(state.get("files"))
     previous = file_map(state.get("files"))
     # key 是小写化的，删除旧文件时要还原状态文件里的原始大小写（大小写敏感卷才找得到文件）。
     previous_rel = {}
@@ -989,6 +1094,14 @@ def main() -> int:
             except ValueError:
                 continue
     new = file_map(files)
+    verified = {}
+    raw_verified = state.get("verified") or {}
+    if isinstance(raw_verified, dict):
+        for raw_key, raw_val in raw_verified.items():
+            try:
+                verified[rel_key(str(raw_key))] = raw_val if isinstance(raw_val, dict) else {}
+            except ValueError:
+                continue
     preserve_changes = manifest.get("preserveLocalChangeGlobs") or []
     preserve_deletions = manifest.get("preserveLocalDeletionGlobs") or []
     force_delete_globs = manifest.get("forceDeleteGlobs") or []
@@ -1032,6 +1145,7 @@ def main() -> int:
     preserved_deletions = set()
     # 保留了玩家修改、但服务端同一文件本次其实也有更新的清单：结尾集中提醒一次。
     preserved_conflicts = []
+    download_jobs = []
     for item in files:
         rel = safe_rel(str(item["path"]))
         key = rel.lower()
@@ -1041,13 +1155,19 @@ def main() -> int:
         if platform_excludes and glob_match(rel, platform_excludes):
             # 本平台不适用（如 macOS 不支持 YSM）：不下载。本地残留由下方扫描统一清除。
             continue
+        had_previous = key in previous
+        previous_hash = previous.get(key, "")
+        if exists and looks_like_current_file(target, expected, item.get("size"), previous_hash, verified.get(key)):
+            ensure_executable_if_needed(target, rel)
+            verified[key] = file_verify_record(target, expected)
+            skipped += 1
+            continue
         current = sha1(target) if exists else ""
         if exists and current == expected:
             ensure_executable_if_needed(target, rel)
+            verified[key] = file_verify_record(target, expected)
             skipped += 1
             continue
-        had_previous = key in previous
-        previous_hash = previous.get(key, "")
         force_sync = glob_match(rel, force_sync_globs)
         if not exists and had_previous and preserve_player and not force_sync and glob_match(rel, preserve_deletions):
             print(f"[保留玩家删除] {rel}")
@@ -1074,23 +1194,47 @@ def main() -> int:
                     shutil.copy2(str(src), target)
                 if sha1(target) == expected:
                     ensure_executable_if_needed(target, rel)
+                    verified[key] = file_verify_record(target, expected)
                     print(f"[接管本地文件] {rel}")
                     adopted += 1
                     continue
                 # adopted content didn't verify (rare); fall through to a normal download
         if exists:
             backup_file(target, root, rel, backup_root)
+        download_jobs.append((item, target, expected, rel, key))
+
+    def run_download_job(job):
+        item, target, expected, rel, key = job
         try:
             source = download_manifest_entry(item, base_url, target, expected, rel)
             ensure_executable_if_needed(target, rel)
-            print(f"[官方源] {rel}" if source == "official" else f"[更新] {rel}")
-            downloaded += 1
+            sync_print(f"[官方源] {rel}" if source == "official" else f"[更新] {rel}")
+            return key, file_verify_record(target, expected), None
         except Exception as exc:
             if is_optional_helper(rel):
-                print(f"[警告] 辅助脚本未更新：{rel}；{exc}")
+                sync_print(f"[警告] 辅助脚本未更新：{rel}；{exc}")
+                return key, None, "optional"
+            return key, None, exc
+
+    if download_jobs:
+        print(f"[同步] 需要更新 {len(download_jobs)} 个文件（并行 {_DOWNLOAD_WORKERS}）。")
+        workers = max(1, min(_DOWNLOAD_WORKERS, len(download_jobs)))
+        if workers == 1:
+            results = [run_download_job(job) for job in download_jobs]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                results = list(pool.map(run_download_job, download_jobs))
+        hard_error = None
+        for key, record, err in results:
+            if record is not None:
+                verified[key] = record
+                downloaded += 1
+            elif err == "optional":
                 preserved += 1
-                continue
-            raise
+            elif hard_error is None:
+                hard_error = err
+        if hard_error is not None:
+            raise hard_error
 
     for old_key, old_hash in previous.items():
         if old_key in new:
@@ -1163,18 +1307,39 @@ def main() -> int:
     if cleanup.get("removeConnectorCache", True):
         remove_connector_cache(root)
     if cleanup.get("disableDuplicateMods", True):
-        disable_duplicate_mods(root, manifest)
+        extras = []
+        mods_dir = root / "mods"
+        if mods_dir.is_dir():
+            managed_mod_paths = set()
+            for item in files:
+                try:
+                    mod_rel = safe_rel(str(item.get("path") or "")).lower()
+                except ValueError:
+                    continue
+                if mod_rel.startswith("mods/") and mod_rel.endswith(".jar"):
+                    managed_mod_paths.add(mod_rel)
+            extras = [
+                jar for jar in mods_dir.glob("*.jar")
+                if jar.relative_to(root).as_posix().lower() not in managed_mod_paths
+            ]
+        if extras or downloaded or adopted or removed or initial_sync:
+            disable_duplicate_mods(root, manifest)
     if cleanup.get("disableLauncherRepairIndex", True):
         disable_launcher_repair_index(pathlib.Path.cwd(), root)
 
+    keep_keys = set(new.keys())
+    verified = {key: value for key, value in verified.items() if key in keep_keys}
     state_out = {
-        "format": 2,
+        "format": 3,
         "packId": manifest.get("packId") or manifest.get("pack") or "",
         "packName": manifest.get("packName") or manifest.get("name") or "",
         "version": manifest.get("version") or "",
         "manifestUrl": manifest_url,
+        "lastManifestUrl": manifest_url,
+        "skipOfficial": bool(_OFFICIAL_SKIP) and not get_proxy_url(),
         "syncedAt": dt.datetime.now().isoformat(timespec="seconds"),
         "files": files,
+        "verified": verified,
     }
     state_path.write_text(json.dumps(state_out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"[同步] 完成。更新={downloaded} 接管={adopted} 跳过={skipped} 保留={preserved} 删除={removed} 备份={backup_root}")

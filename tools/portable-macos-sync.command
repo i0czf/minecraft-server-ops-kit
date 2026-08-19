@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# @version 10
+# @version 12
 set -e
 cd "$(dirname "$0")"
 SCRIPT_DIR="$PWD"
@@ -37,12 +37,6 @@ if [ -z "$MANIFEST_URLS" ]; then
     fi
   done
 fi
-for candidate in "$INSTANCE_DIR/UPDATE-URL-LAN.txt" "$INSTANCE_DIR/PORTABLE-UPDATE-URL-LAN.txt" "$SCRIPT_DIR/UPDATE-URL-LAN.txt" "$SCRIPT_DIR/PORTABLE-UPDATE-URL-LAN.txt"; do
-  if [ -f "$candidate" ]; then
-    append_manifest_url "$(head -n 1 "$candidate")"
-  fi
-done
-
 if ! command -v python3 >/dev/null 2>&1; then
   echo "[错误] 没找到 python3。请先安装 Python 3，或在 Windows 上运行 Windows-sync.bat 更新。"
   read -r -p "按回车关闭。"
@@ -67,7 +61,7 @@ fi
 
 set +e
 python3 - "$MANIFEST_URLS" "$SCRIPT_DIR" "$0" <<'PY'
-import hashlib, http.client, ipaddress, os, pathlib, re, shutil, socket, stat, sys, tempfile, time, urllib.parse, urllib.request
+import hashlib, http.client, ipaddress, json, os, pathlib, re, shutil, socket, stat, sys, tempfile, time, urllib.parse, urllib.request
 
 # 更新源是家宽直连地址，绝不走系统代理：macOS 上 urllib 会自动读系统代理（Clash“设为系统
 # 代理”），代理到不了 18088 就把自刷新请求整齐变成 503。空 ProxyHandler 强制直连、绕过代理。
@@ -119,8 +113,38 @@ def is_private_update_url(url):
         return ipaddress.ip_address(host).is_private
     except ValueError:
         return False
-manifest_urls = ([url for url in manifest_urls if is_private_update_url(url)] +
-                 [url for url in manifest_urls if not is_private_update_url(url)])
+def probe_timeout(url):
+    return 8
+last_good = ""
+# argv[2] is script_dir; instance is parent when script lives in _updater.
+instance_guess = pathlib.Path(sys.argv[2]).resolve()
+if instance_guess.name == "_updater":
+    instance_guess = instance_guess.parent
+state_file = instance_guess / ".portable-sync-state.json"
+if state_file.is_file():
+    try:
+        state = json.loads(state_file.read_text(encoding="utf-8-sig"))
+        last_good = str(state.get("lastManifestUrl") or state.get("manifestUrl") or "")
+    except Exception:
+        last_good = ""
+ordered = []
+seen = set()
+def add(url):
+    key = (url or "").strip()
+    if not key:
+        return
+    low = key.lower()
+    if low in seen:
+        return
+    seen.add(low)
+    ordered.append(key)
+public = [url for url in manifest_urls if not is_private_update_url(url)]
+candidates = public or list(manifest_urls)
+if last_good and not is_private_update_url(last_good):
+    add(last_good)
+for url in candidates:
+    add(url)
+manifest_urls = ordered
 script_dir = pathlib.Path(sys.argv[2]).resolve()
 self_path = pathlib.Path(sys.argv[3]).resolve()
 if not manifest_urls:
@@ -138,7 +162,7 @@ def mask_url(url):
 for candidate in manifest_urls:
     try:
         # 先探测一次清单；成功后整轮自刷新复用这个地址，避免五个文件各自刷同一条错误。
-        fetch_bytes(candidate, timeout=8)
+        fetch_bytes(candidate, timeout=probe_timeout(candidate))
         selected_manifest_url = candidate
         break
     except Exception as exc:
@@ -147,7 +171,7 @@ if not selected_manifest_url:
     print("[更新器] 更新源暂时不可达，跳过自刷新（已保留本地脚本）：" + "；".join(manifest_errors))
     raise SystemExit(0)
 if selected_manifest_url != manifest_urls[0]:
-    print("[更新器] 已切换到备用更新地址（通常是局域网地址）。")
+    print("[更新器] 已切换到备用更新地址。")
 base = selected_manifest_url.rsplit("/", 1)[0] + "/"
 
 def version(path):
@@ -293,4 +317,4 @@ exit "$status"
 #
 # 版本号头在 v9 过渡期曾暂时冻结，避免旧代 copy2 原地覆盖脚本后按旧字节偏移
 # 继续解析而出现 unexpected EOF。当前自更新已改成同目录临时文件 + os.replace，
-# v10 用于把“局域网备用源 + 单次预探测”安全推送到存量 Mac 客户端。
+# v12 用于把“公开更新源优先 + 状态复用”安全推送到存量 Mac 客户端。

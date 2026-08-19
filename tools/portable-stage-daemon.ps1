@@ -89,8 +89,7 @@ function Read-UpdateUrls {
     }
     # TFCR-update-url.txt 是旧周目玩家包留下的文件名，老玩家实例里还有——请勿删除。
     $primary = @('UPDATE-URL.txt', 'PORTABLE-UPDATE-URL.txt', 'TFCR-update-url.txt', '_updater\UPDATE-URL.txt', '_updater\PORTABLE-UPDATE-URL.txt')
-    $fallback = @('UPDATE-URL-LAN.txt', 'PORTABLE-UPDATE-URL-LAN.txt', '_updater\UPDATE-URL-LAN.txt', '_updater\PORTABLE-UPDATE-URL-LAN.txt')
-    foreach ($rel in ($primary + $fallback)) {
+    foreach ($rel in $primary) {
         $p = Join-Path $Root $rel
         if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { continue }
         try {
@@ -117,7 +116,7 @@ function Test-PrivateUpdateUrl {
 }
 
 function Test-ManifestUrl {
-    param([string]$Url)
+    param([string]$Url, [int]$TimeoutSec = 8)
     $request = $null
     $response = $null
     $stream = $null
@@ -126,8 +125,8 @@ function Test-ManifestUrl {
         $request = [System.Net.HttpWebRequest]::Create($Url)
         $request.Proxy = $null
         $request.Method = 'GET'
-        $request.Timeout = 8000
-        $request.ReadWriteTimeout = 8000
+        $request.Timeout = [Math]::Max(1000, $TimeoutSec * 1000)
+        $request.ReadWriteTimeout = [Math]::Max(1000, $TimeoutSec * 1000)
         $request.UserAgent = 'portable-server-kit-stage/1.0'
         $response = $request.GetResponse()
         $stream = $response.GetResponseStream()
@@ -267,14 +266,18 @@ function Save-UrlToFile {
         $buffer = New-Object byte[] 65536
         $got = [long]0
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $checkedSlow = $false
+        $nextCheck = [double]$TimeoutSec
+        $minRate = 0
+        if ($MinBytesAfterTimeout -gt 0) { $minRate = 128KB }
         while (($n = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
             $outputStream.Write($buffer, 0, $n)
             $got += $n
-            if ($MinBytesAfterTimeout -gt 0 -and -not $checkedSlow -and $sw.Elapsed.TotalSeconds -ge $TimeoutSec) {
-                if ($got -lt $MinBytesAfterTimeout) { throw 'official source too slow' }
-                $checkedSlow = $true
-            }
+            if ($nextCheck -le 0) { continue }
+            $elapsed = $sw.Elapsed.TotalSeconds
+            if ($elapsed -lt $nextCheck) { continue }
+            if ($minRate -gt 0 -and $got -lt ($minRate * $elapsed)) { throw 'official source too slow' }
+            if ($MinBytesAfterTimeout -gt 0 -and $got -lt $MinBytesAfterTimeout) { throw 'official source too slow' }
+            $nextCheck = $elapsed + [Math]::Max(1, $TimeoutSec)
         }
     } catch {
         try { $request.Abort() } catch {}
@@ -394,11 +397,31 @@ if ($manifestUrls.Count -eq 0) {
     Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
     return
 }
-$manifestUrls = @(@($manifestUrls | Where-Object { Test-PrivateUpdateUrl $_ }) + @($manifestUrls | Where-Object { -not (Test-PrivateUpdateUrl $_) }))
+$lastGood = ''
+$statePath = Join-Path $instanceRoot '.portable-sync-state.json'
+if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+    try {
+        $st = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($st.lastManifestUrl) { $lastGood = [string]$st.lastManifestUrl }
+        elseif ($st.manifestUrl) { $lastGood = [string]$st.manifestUrl }
+    } catch {}
+}
+$ordered = New-Object System.Collections.Generic.List[string]
+$seenUrl = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+$addUrl = {
+    param([string]$Value)
+    $v = ([string]$Value).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($v) -and $seenUrl.Add($v)) { [void]$ordered.Add($v) }
+}
+if (-not [string]::IsNullOrWhiteSpace($lastGood) -and -not (Test-PrivateUpdateUrl $lastGood)) { & $addUrl $lastGood }
+$publicUrls = @($manifestUrls | Where-Object { -not (Test-PrivateUpdateUrl $_) })
+$candidates = if ($publicUrls.Count -gt 0) { $publicUrls } else { @($manifestUrls) }
+foreach ($u in $candidates) { & $addUrl $u }
+$manifestUrls = @($ordered)
 $manifestUrl = ""
 $selectedIndex = -1
 for ($i = 0; $i -lt $manifestUrls.Count; $i++) {
-    if (Test-ManifestUrl -Url ([string]$manifestUrls[$i])) {
+    if (Test-ManifestUrl -Url ([string]$manifestUrls[$i]) -TimeoutSec 8) {
         $manifestUrl = [string]$manifestUrls[$i]
         $selectedIndex = $i
         break
@@ -409,7 +432,7 @@ if ([string]::IsNullOrWhiteSpace($manifestUrl)) {
     Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
     return
 }
-if ($selectedIndex -gt 0) { Write-Log "已切换到备用更新地址（通常是局域网地址）。" }
+if ($selectedIndex -gt 0) { Write-Log "已切换到备用更新地址。" }
 $baseUrl = $manifestUrl.Substring(0, $manifestUrl.LastIndexOf('/') + 1)
 Write-Log ("暂存 daemon 启动 (PID $PID)，间隔 ${IntervalSeconds}s，最长 ${MaxRuntimeMinutes} 分钟。")
 
@@ -485,7 +508,7 @@ function Save-StagedEntry {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $useProxy = Test-StageShouldUseProxy $url
         try {
-            Save-StagedFile -Url $url -Destination $Destination -ExpectedSha1 $ExpectedSha1 -TimeoutSec 8 -AllowProxy:$useProxy -MinBytesAfterTimeout (256KB)
+            Save-StagedFile -Url $url -Destination $Destination -ExpectedSha1 $ExpectedSha1 -TimeoutSec 8 -AllowProxy:$useProxy -MinBytesAfterTimeout (1MB)
             return 'official'
         } catch {
             Write-Log ("[预下载] 官方源不可用（{0:N1}s，{1}），改走更新服务：{2}" -f $sw.Elapsed.TotalSeconds, (Get-DownloadFailReason $_.Exception), $Rel)

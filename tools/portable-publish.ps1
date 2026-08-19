@@ -124,11 +124,27 @@ function Assert-PowerShellSyntax {
     }
 }
 
+function Assert-CmdBatchLineEndings {
+    # cmd + chcp 65001 + LF 会让多字节行错位，玩家双击表现为闪退。
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $lfOnly = 0
+    for ($i = 0; $i -lt $bytes.Length; $i++) {
+        if ($bytes[$i] -eq 10 -and ($i -eq 0 -or $bytes[$i - 1] -ne 13)) {
+            $lfOnly++
+        }
+    }
+    if ($lfOnly -gt 0) {
+        throw ("拒绝发布混用 LF 的批处理（cmd 在 UTF-8 代码页下会闪退）：{0} 含 {1} 处 LF-only 换行" -f $Path, $lfOnly)
+    }
+}
+
 function Copy-ToolFile {
     param([string]$SourceName, [string]$DestinationName, [string]$DestinationRoot)
     $source = Join-Path $Root (Join-Path 'tools' $SourceName)
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "缺少便携工具文件：$source" }
     if ($SourceName -like '*.ps1') { Assert-PowerShellSyntax -Path $source }
+    if ($SourceName -like '*.bat' -or $SourceName -like '*.cmd') { Assert-CmdBatchLineEndings -Path $source }
     $dest = Join-Path $DestinationRoot $DestinationName
     $rel = [System.IO.Path]::GetFullPath($dest).Substring([System.IO.Path]::GetFullPath($publishDir).TrimEnd('\', '/').Length).TrimStart('\', '/')
     Copy-FileIncremental -Source $source -Dest $dest -Rel $rel
