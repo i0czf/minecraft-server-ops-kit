@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$ConfigPath = ".\tools\ops-config.json"
 )
 
@@ -270,6 +270,21 @@ function Send-QQGroup {
     $Content = $Content -replace '\*\*', ''
     $Content = $Content -replace '`', ''
 
+    if ($Content -match '^\[聊天\]') {
+        if (-not (Test-ChatRelayEnabled)) { return }
+        try {
+            $rewritten = Convert-GameAtToCq -Text $Content
+            if ($rewritten -and $rewritten -ne $Content) {
+                $Content = $rewritten
+                try {
+                    Add-Content -LiteralPath (Join-Path $Root 'logs\discord-watch.log') -Value (
+                        "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') game-at rewritten to CQ"
+                    ) -Encoding UTF8
+                } catch {}
+            }
+        } catch { }
+    }
+
     foreach ($groupId in $groupIds) {
         $body = @{
             group_id = [Int64]$groupId
@@ -391,6 +406,143 @@ function Limit-Text {
     param([string]$Text, [int]$Max)
     if ($Text.Length -le $Max) { return $Text }
     return $Text.Substring(0, [Math]::Max(0, $Max - 3)) + "..."
+}
+
+function Test-ChatRelayEnabled {
+    $now = Get-Date
+    $path = Join-Path $Root 'logs\qq-chat-relay.json'
+    if (-not $script:ChatRelayCheckedAt -or ($now - $script:ChatRelayCheckedAt).TotalSeconds -ge 5) {
+        $script:ChatRelayCheckedAt = $now
+        $script:ChatRelayEnabled = $true
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            try {
+                $obj = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+                $prop = $obj.PSObject.Properties['chatRelay']
+                if ($prop -and $null -ne $prop.Value) {
+                    $script:ChatRelayEnabled = [bool]$prop.Value
+                }
+            } catch {
+                $script:ChatRelayEnabled = $true
+            }
+        }
+    }
+    return [bool]$script:ChatRelayEnabled
+}
+
+function Update-PlayerBindCache {
+    $store = 'logs/qq-player-binds.json'
+    try {
+        if ($script:Config.qq.playerBind -and $script:Config.qq.playerBind.store) {
+            $configured = [string]$script:Config.qq.playerBind.store
+            if (-not [string]::IsNullOrWhiteSpace($configured)) { $store = $configured }
+        }
+    } catch { }
+    $path = Resolve-RootPath $store
+    $now = Get-Date
+    $mtime = $null
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $mtime = (Get-Item -LiteralPath $path).LastWriteTimeUtc
+    }
+    $first = -not $script:PlayerBindLoadedAt
+    $stale = $script:PlayerBindLoadedAt -and ($now - $script:PlayerBindLoadedAt).TotalSeconds -ge 30
+    $changed = $mtime -and $script:PlayerBindMtime -and ($mtime -ne $script:PlayerBindMtime)
+    if (-not ($first -or $stale -or $changed)) { return }
+    $script:PlayerBindLoadedAt = $now
+    $script:PlayerBindMtime = $mtime
+    $map = @{}
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        try {
+            $obj = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($bind in @($obj.bindings)) {
+                $name = [string]$bind.name
+                $qq = [string]$bind.qq
+                if ([string]::IsNullOrWhiteSpace($name) -or [string]::IsNullOrWhiteSpace($qq)) { continue }
+                if ($name -notmatch '^[A-Za-z0-9_]{1,16}$') { continue }
+                $map[$name.ToLowerInvariant()] = $qq
+            }
+        } catch {
+            $map = @{}
+        }
+    }
+    $script:PlayerBindByName = $map
+}
+
+function Convert-GameAtToSegments {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    Update-PlayerBindCache
+    $segments = New-Object System.Collections.Generic.List[object]
+    $hasAt = $false
+    if ([string]::IsNullOrEmpty($Text)) {
+        return [pscustomobject]@{
+            HasAt    = $false
+            Segments = @(@{ type = 'text'; data = @{ text = '' } })
+        }
+    }
+    $regex = [regex]'(?<=^|[\s\[\(])@([A-Za-z0-9_]{1,16})(?![A-Za-z0-9_])'
+    $last = 0
+    foreach ($match in $regex.Matches($Text)) {
+        if ($match.Index -gt $last) {
+            $segments.Add(@{
+                type = 'text'
+                data = @{ text = $Text.Substring($last, $match.Index - $last) }
+            })
+        }
+        $name = $match.Groups[1].Value
+        $qq = $null
+        if ($script:PlayerBindByName) {
+            $qq = $script:PlayerBindByName[$name.ToLowerInvariant()]
+        }
+        if ($qq) {
+            $segments.Add(@{
+                type = 'at'
+                data = @{ qq = [string]$qq }
+            })
+            $hasAt = $true
+        } else {
+            $segments.Add(@{
+                type = 'text'
+                data = @{ text = $match.Value }
+            })
+        }
+        $last = $match.Index + $match.Length
+    }
+    if ($last -lt $Text.Length) {
+        $segments.Add(@{
+            type = 'text'
+            data = @{ text = $Text.Substring($last) }
+        })
+    }
+    if ($segments.Count -eq 0) {
+        $segments.Add(@{
+            type = 'text'
+            data = @{ text = $Text }
+        })
+    }
+    # 逗号运算符防止 PowerShell 把返回对象拆开。
+    return ,([pscustomobject]@{
+        HasAt    = $hasAt
+        Segments = $segments.ToArray()
+    })
+}
+
+function Convert-GameAtToCq {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $split = Convert-GameAtToSegments -Text $Text
+    if ($split -is [System.Array]) {
+        $split = @($split | Where-Object { $_ -and $_.PSObject.Properties['HasAt'] } | Select-Object -Last 1)[0]
+    }
+    if (-not $split -or -not $split.HasAt) { return $Text }
+    $out = New-Object System.Text.StringBuilder
+    foreach ($seg in @($split.Segments)) {
+        if ($seg.type -eq 'at' -and $seg.data -and $seg.data.qq) {
+            [void]$out.Append('[CQ:at,qq=').Append([string]$seg.data.qq).Append(']')
+        } else {
+            [void]$out.Append([string]$seg.data.text)
+        }
+    }
+    $cq = $out.ToString()
+    if ([string]::IsNullOrEmpty($cq)) { return $Text }
+    return $cq
 }
 
 function Test-JoinIpEnabled {
@@ -1779,7 +1931,8 @@ function Format-LogLine {
 
     if ($script:Config.logWatch.forwardChat -and $message -match '^<([^>]+)>\s*(.+)$') {
         if (-not (Test-DiscordEventEnabled "chat")) { return $null }
-        return "[聊天] **$($matches[1])**： " + (Limit-Text $matches[2] $max)
+        $chatBody = Limit-Text $matches[2] $max
+        return "[聊天] **$($matches[1])**： " + $chatBody
     }
 
     if ($script:Config.logWatch.forwardCommands -and $message -match '^(.+?) issued server command:\s*(.+)$') {
@@ -2927,6 +3080,12 @@ function Watch-BackupVerifyOnce {
 
 try {
 $script:Config = Read-Config -Path (Resolve-RootPath $ConfigPath)
+$script:ChatRelayEnabled = $true
+$script:ChatRelayCheckedAt = $null
+$script:PlayerBindByName = @{}
+$script:PlayerBindLoadedAt = $null
+$script:PlayerBindMtime = $null
+try { Update-PlayerBindCache } catch { $script:PlayerBindByName = @{} }
 $script:LogOffsets = @{}
 $script:RecentMessages = @{}
 $script:SeenCrashes = @{}

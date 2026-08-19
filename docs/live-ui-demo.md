@@ -38,7 +38,7 @@ QQ 侧可以收到服务端事件或转发的聊天消息：
 
 ![游戏公屏显示绑定 ID 并悬停预览皮肤头像](assets/qq-player-bind-minecraft-preview.png)
 
-命令、权限和配置见 [QQ 号与游戏 ID 绑定](qq-player-bind-游戏ID绑定.md)。
+命令、权限和配置见 [QQ 号与游戏 ID 绑定](qq-player-bind-游戏ID绑定.md)。`v0.3.1` 起还支持游戏 `@游戏ID` 点到 QQ、管理员 `!绑定提醒 开|关` 和 `!转发 开|关`。
 
 ## 反控指令集合
 
