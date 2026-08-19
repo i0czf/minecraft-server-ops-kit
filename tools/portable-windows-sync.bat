@@ -55,8 +55,18 @@ rem Promote any files the background daemon pre-downloaded during the last sessi
 rem before the sync runs. Best-effort: jars are unlocked now (game not started yet).
 if exist "%PORTABLE_SCRIPT_DIR%\portable-stage-daemon.ps1" powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PORTABLE_SCRIPT_DIR%\portable-stage-daemon.ps1" -InstanceDir "%PORTABLE_INSTANCE_DIR%" -Mode Promote
 
+set "PORTABLE_PY="
+where py >nul 2>nul && set "PORTABLE_PY=py -3"
+if not defined PORTABLE_PY where python >nul 2>nul && set "PORTABLE_PY=python"
+if defined PORTABLE_PY if exist "%PORTABLE_SCRIPT_DIR%\player-update-generic.py" goto :SyncWithPython
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PORTABLE_SCRIPT_DIR%\player-update-generic.ps1" -InstanceDir "%PORTABLE_INSTANCE_DIR%" -NoPause
 set "code=%ERRORLEVEL%"
+goto :AfterSync
+:SyncWithPython
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Write-Host '[同步] 使用 Python 同步器'"
+%PORTABLE_PY% "%PORTABLE_SCRIPT_DIR%\player-update-generic.py" --instance-dir "%PORTABLE_INSTANCE_DIR%"
+set "code=%ERRORLEVEL%"
+:AfterSync
 if not "%code%"=="0" goto :SyncFailed
 
 rem Launch the background staging daemon as an independent process (survives this
@@ -69,7 +79,9 @@ rem its own console at runtime instead.
 rem First stop any daemon left over from a previous session so this launch always runs
 rem the current daemon version and is never blocked by a stale single-instance lock.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$lk=Join-Path $env:PORTABLE_INSTANCE_DIR '.portable-staging\daemon.lock'; if(Test-Path -LiteralPath $lk){ try{ $op=[int]((Get-Content -LiteralPath $lk -Raw -EA SilentlyContinue).Trim()); $cp=Get-CimInstance Win32_Process -Filter ('ProcessId='+$op) -EA SilentlyContinue; if($cp -and $cp.CommandLine -like '*portable-stage-daemon*'){ Stop-Process -Id $op -Force -EA SilentlyContinue } }catch{}; Remove-Item -LiteralPath $lk -Force -EA SilentlyContinue }"
-if exist "%PORTABLE_SCRIPT_DIR%\portable-stage-daemon.ps1" start "portable-stage-daemon" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PORTABLE_SCRIPT_DIR%\portable-stage-daemon.ps1" -InstanceDir "%PORTABLE_INSTANCE_DIR%" -Mode Watch -Toast
+if defined PORTABLE_PY if exist "%PORTABLE_SCRIPT_DIR%\portable-stage-daemon.py" (
+  start "portable-stage-daemon" /min %PORTABLE_PY% "%PORTABLE_SCRIPT_DIR%\portable-stage-daemon.py" --instance-dir "%PORTABLE_INSTANCE_DIR%" --mode watch
+) else if exist "%PORTABLE_SCRIPT_DIR%\portable-stage-daemon.ps1" start "portable-stage-daemon" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PORTABLE_SCRIPT_DIR%\portable-stage-daemon.ps1" -InstanceDir "%PORTABLE_INSTANCE_DIR%" -Mode Watch -Toast
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $root=[System.IO.Path]::GetFullPath($env:PORTABLE_INSTANCE_DIR); $launcherDir=Join-Path $root '_launchers'; $mcHome=''; $p=Split-Path -Parent $root; $gp=''; if($p){ $gp=Split-Path -Parent $p }; if($gp -and ((Split-Path -Leaf $p) -ieq 'versions') -and ((Split-Path -Leaf $gp) -ieq '.minecraft')){ $mcHome=Split-Path -Parent $gp }; Write-Host ''; $started=$false; $pclHome=$root; if($mcHome){ $pclHome=$mcHome }; $pcl=$null; foreach($n in @('PCL.exe','Plain Craft Launcher.exe')){ $c=Join-Path $pclHome $n; if(Test-Path -LiteralPath $c -PathType Leaf){ $pcl=$c; break } }; if(-not $pcl -and $mcHome){ foreach($src in @((Join-Path $root 'PCL.exe'),(Join-Path $launcherDir 'PCL.exe'))){ if(Test-Path -LiteralPath $src -PathType Leaf){ $dest=Join-Path $mcHome 'PCL.exe'; try { Copy-Item -LiteralPath $src -Destination $dest -Force; $pcl=$dest; Write-Host ('[启动器] 已把 PCL 放到 ' + $mcHome + '（PCL 只识别自己所在目录下的 .minecraft 实例）') } catch { $pcl=$null }; break } } }; if($pcl){ Write-Host ('[启动器] 正在启动 PCL：' + $pcl); try { Start-Process -FilePath $pcl -WorkingDirectory (Split-Path -Parent $pcl); $started=$true; Write-Host '[启动器] PCL 已启动。' } catch { Write-Host ('[启动器] PCL 启动失败：' + $_.Exception.Message) } }; if(-not $started){ $jar=$null; foreach($c in @((Join-Path $root 'HMCL.jar'),(Join-Path $launcherDir 'HMCL.jar'))){ if(Test-Path -LiteralPath $c -PathType Leaf){ $jar=$c; break } }; if($jar){ $wd=$root; if($mcHome){ $wd=$mcHome; Write-Host ('[启动器] 将从 ' + $wd + ' 启动 HMCL 以识别实例。') }; Write-Host '[启动器] 正在启动 HMCL...'; $java=Get-Command javaw.exe -ErrorAction SilentlyContinue; try { if($java){ Start-Process -FilePath $java.Source -ArgumentList @('-jar',$jar) -WorkingDirectory $wd } else { Start-Process -FilePath $jar -WorkingDirectory $wd }; $started=$true; Write-Host '[启动器] HMCL 已启动。' } catch { Write-Host ('[启动器] HMCL 启动失败：' + $_.Exception.Message) } } }; if(-not $started){ $sakura=Join-Path $root 'SakuraLauncher.exe'; if(Test-Path -LiteralPath $sakura -PathType Leaf){ Write-Host '[启动器] 正在启动 SakuraLauncher...'; try { Start-Process -FilePath $sakura -WorkingDirectory $root; $started=$true; Write-Host '[启动器] SakuraLauncher 已启动。' } catch {} } }; if(-not $started){ Write-Host ('[启动器] 未找到可自动启动的启动器，请检查：' + $root + ' 或 ' + $launcherDir) }; Write-Host ''; Write-Host '按回车键关闭窗口...'"
 pause >nul

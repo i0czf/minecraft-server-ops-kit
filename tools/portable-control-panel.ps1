@@ -346,6 +346,8 @@ try {
               <TextBlock Text="改完配置或脚本后点「重启运维监控」一键先停后起全部运维，无需重启 Minecraft 服务端。"
                          Style="{StaticResource Hint}" Margin="0,0,0,8"/>
               <WrapPanel>
+                <Button x:Name="btnWebPanel" Content="启动 Web 面板" Style="{StaticResource AccentButton}"
+                        ToolTip="启动本地网页运维入口；默认监听 127.0.0.1:58080，可按说明配置端口转发"/>
                 <Button x:Name="btnOpsRestart" Content="重启运维监控" Style="{StaticResource AccentButton}"/>
                 <Button x:Name="btnOpsStart" Content="启动所有运维" Style="{StaticResource BaseButton}"/>
                 <Button x:Name="btnOpsStop" Content="停止所有运维" Style="{StaticResource DangerButton}"/>
@@ -1308,6 +1310,7 @@ namespace PanelNative {
     })
 
     $BatButtons = @{
+        btnWebPanel     = '一键便携-启动Web控制面板.bat'
         btnWizard       = '一键便携-初始化配置.bat'
         btnQQSetup      = '一键便携-配置QQ机器人.bat'
         btnRcon         = '一键便携-启用RCON反控.bat'

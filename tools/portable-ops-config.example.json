@@ -129,12 +129,17 @@
                         "pollSeconds":  30
                     },
     "backupSchedule":  {
-                           "_说明":  "定时备份：有 runTimes 时按本地时钟早/午/晚触发，否则按 intervalMinutes。重启运维不会重复触发；有玩家在线或近期 MSPT 超阈值时自动延后重试。分层保留：keepRolling 最近 N 份，keepDaily 每天 1 份共 N 天，keepWeekly 每周 1 份共 N 周；三者取并集。maxTotalSizeGB 为备份目录体积上限。",
+                           "_说明":  "定时备份：有 runTimes 时按本地时钟早/午/晚触发，否则按 intervalMinutes。设置 activityAware=true 后，有人在线按 activeIntervalMinutes 备份，最后一人下线后去抖补一次收尾，空服不再重复周期打包；未设置时保持固定调度兼容模式。重启运维不会重复触发；有玩家在线或近期 MSPT 超阈值时可自动延后重试。分层保留：keepRolling 最近 N 份，keepDaily 每天 1 份共 N 天，keepWeekly 每周 1 份共 N 周；三者取并集。maxTotalSizeGB 为备份目录体积上限。",
                            "enabled":  true,
                            "worldName":  "world",
                            "backupPrefix":  "server",
                            "startupDelayMinutes":  15,
                            "intervalMinutes":  360,
+                           "activityAware":  false,
+                           "activeIntervalMinutes":  30,
+                           "offlineFinalDelayMinutes":  2,
+                           "offlineFinalMinAgeMinutes":  20,
+                           "playerPollMinutes":  1,
                            "runTimes":  [
                                             "08:00",
                                             "13:00",

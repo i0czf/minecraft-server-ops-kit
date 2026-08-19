@@ -64,8 +64,7 @@ function Read-UpdateUrls {
     } else {
         # TFCR-update-url.txt 是旧周目玩家包留下的文件名，老玩家实例里还有——请勿删除。
         $primary = @('UPDATE-URL.txt', 'PORTABLE-UPDATE-URL.txt', 'TFCR-update-url.txt', '_updater\UPDATE-URL.txt', '_updater\PORTABLE-UPDATE-URL.txt')
-        $fallback = @('UPDATE-URL-LAN.txt', 'PORTABLE-UPDATE-URL-LAN.txt', '_updater\UPDATE-URL-LAN.txt', '_updater\PORTABLE-UPDATE-URL-LAN.txt')
-        foreach ($rel in @($primary + $fallback)) {
+        foreach ($rel in $primary) {
             $path = Join-Path $Root $rel
             if (Test-Path -LiteralPath $path -PathType Leaf) {
                 try { [void]$rawValues.Add((Get-Content -LiteralPath $path -Raw -Encoding UTF8)) } catch { }
@@ -141,7 +140,10 @@ $script:ProxyUrl = $null
 $script:ProxyResolved = $false
 $script:OfficialSkip = $false
 $script:OfficialSkipNotified = $false
-$script:OfficialMinBytes = 256KB
+$script:OfficialMinBytes = 1MB
+$script:OfficialMinRateBps = 128KB
+$script:PrivateProbeTimeoutSec = 2
+$script:PublicProbeTimeoutSec = 8
 
 function Normalize-ProxyUrl {
     param([string]$Raw)
@@ -259,6 +261,77 @@ function Test-ShouldUseProxyForOfficial {
     return $true
 }
 
+function Get-ProbeTimeoutSec {
+    param([string]$Url)
+    try { $hostName = ([Uri]$Url).Host } catch { return $script:PublicProbeTimeoutSec }
+    if (Test-LocalOrPrivateHost $hostName) { return $script:PrivateProbeTimeoutSec }
+    return $script:PublicProbeTimeoutSec
+}
+
+function Test-PrivateUpdateUrl {
+    param([string]$Url)
+    try { return (Test-LocalOrPrivateHost ([Uri]$Url).Host) } catch { return $false }
+}
+
+function Get-OrderedManifestUrls {
+    param([string[]]$Urls, [string]$LastGood = '')
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $out = New-Object System.Collections.Generic.List[string]
+    $add = {
+        param([string]$Value)
+        $v = ([string]$Value).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($v) -and $seen.Add($v)) { [void]$out.Add($v) }
+    }
+    $public = @($Urls | Where-Object { -not (Test-PrivateUpdateUrl $_) })
+    $candidates = if ($public.Count -gt 0) { $public } else { @($Urls) }
+    if (-not [string]::IsNullOrWhiteSpace($LastGood) -and -not (Test-PrivateUpdateUrl $LastGood)) { & $add $LastGood }
+    foreach ($u in $candidates) { & $add $u }
+    return @($out)
+}
+
+function Get-FileVerifyRecord {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Sha1)
+    $item = Get-Item -LiteralPath $Path
+    return [ordered]@{ sha1 = $Sha1.ToLowerInvariant(); size = [int64]$item.Length; mtime = [int64][double]$item.LastWriteTimeUtc.Subtract([datetime]'1970-01-01Z').TotalSeconds }
+}
+
+function Test-LooksLikeCurrentFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Expected,
+        $ManifestSize,
+        [string]$PreviousHash,
+        $Verified
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($Expected)) { return $false }
+    $item = Get-Item -LiteralPath $Path
+    $size = [int64]$item.Length
+    if ($null -ne $ManifestSize -and [string]$ManifestSize -ne '' -and [string]$ManifestSize -ne '0') {
+        try { if ($size -ne [int64]$ManifestSize) { return $false } } catch {}
+    }
+    $expected = $Expected.ToLowerInvariant()
+    $previous = ([string]$PreviousHash).ToLowerInvariant()
+    $vSha = ''
+    $vSize = [int64]-1
+    $vMtime = [int64]-1
+    if ($Verified) {
+        try { $vSha = ([string]$Verified.sha1).ToLowerInvariant() } catch {}
+        try { $vSize = [int64]$Verified.size } catch {}
+        try { $vMtime = [int64]$Verified.mtime } catch {}
+    }
+    $mtime = [int64][double]$item.LastWriteTimeUtc.Subtract([datetime]'1970-01-01Z').TotalSeconds
+    if ($previous -eq $expected) {
+        if ($vSha -eq $expected) {
+            if ($vSize -eq $size -and $vMtime -eq $mtime) { return $true }
+            return ((Get-Sha1 -Path $Path) -eq $expected)
+        }
+        return $true
+    }
+    if ($vSha -eq $expected -and $vSize -eq $size -and $vMtime -eq $mtime) { return $true }
+    return ((Get-Sha1 -Path $Path) -eq $expected)
+}
+
 function New-DirectHttpRequest {
     param([Parameter(Mandatory = $true)][string]$Url, [int]$TimeoutSec = 30, [switch]$AllowProxy)
     # 家宽更新源走非标准端口，系统代理（Clash/安全软件）可能把请求丢进黑洞，必须直连。
@@ -356,8 +429,11 @@ function Read-UrlUtf8Text {
             return ($reader.ReadToEnd()).TrimStart([char]0xFEFF)
         } catch {
             if ($attempt -ge $Retries) { throw }
-            Write-Host ("[同步] 清单获取失败（第 " + ($attempt + 1) + " 次）：" + $_.Exception.Message + "；3 秒后重试...")
-            Start-Sleep -Seconds 3
+            $wait = if ($TimeoutSec -le 2) { 0 } else { 3 }
+            if ($wait -gt 0) {
+                Write-Host ("[同步] 清单获取失败（第 " + ($attempt + 1) + " 次）：" + $_.Exception.Message + "；${wait} 秒后重试...")
+                Start-Sleep -Seconds $wait
+            }
         } finally {
             if ($reader) { $reader.Dispose() }
             if ($response) { $response.Dispose() }
@@ -366,25 +442,27 @@ function Read-UrlUtf8Text {
 }
 
 function Copy-DownloadStream {
-    param($InputStream, $OutputStream, [int]$TimeoutSec = 60, [int]$MinBytesAfterTimeout = 0)
+    param($InputStream, $OutputStream, [int]$TimeoutSec = 60, [int]$MinBytesAfterTimeout = 0, [int]$MinRateBps = 0)
     $buffer = New-Object byte[] 65536
     $got = [long]0
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $checkedSlow = $false
+    $nextCheck = [double]$TimeoutSec
     while (($n = $InputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
         $OutputStream.Write($buffer, 0, $n)
         $got += $n
-        if ($MinBytesAfterTimeout -gt 0 -and -not $checkedSlow -and $sw.Elapsed.TotalSeconds -ge $TimeoutSec) {
-            if ($got -lt $MinBytesAfterTimeout) { throw 'official source too slow' }
-            $checkedSlow = $true
-        }
+        if ($nextCheck -le 0) { continue }
+        $elapsed = $sw.Elapsed.TotalSeconds
+        if ($elapsed -lt $nextCheck) { continue }
+        if ($MinRateBps -gt 0 -and $got -lt ($MinRateBps * $elapsed)) { throw 'official source too slow' }
+        if ($MinBytesAfterTimeout -gt 0 -and $got -lt $MinBytesAfterTimeout) { throw 'official source too slow' }
+        $nextCheck = $elapsed + [Math]::Max(1, $TimeoutSec)
     }
 }
 
 function Save-OfficialViaProxy {
     # HttpWebRequest + 系统代理时 Timeout 经常不生效。先用 HttpClient 拿响应头（8 秒取消），
     # 再按字节流读 body：8 秒内字节太少就放弃，避免国内直连细水长流。
-    param([Parameter(Mandatory = $true)][string]$Url, [Parameter(Mandatory = $true)][string]$Path, [int]$TimeoutSec = 8, [string]$ProxyUrl, [int]$MinBytesAfterTimeout = 0)
+    param([Parameter(Mandatory = $true)][string]$Url, [Parameter(Mandatory = $true)][string]$Path, [int]$TimeoutSec = 8, [string]$ProxyUrl, [int]$MinBytesAfterTimeout = 0, [int]$MinRateBps = 0)
     Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
     $handler = New-Object System.Net.Http.HttpClientHandler
     $handler.UseProxy = $true
@@ -405,7 +483,7 @@ function Save-OfficialViaProxy {
         }
         $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
         $outputStream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-        Copy-DownloadStream -InputStream $inputStream -OutputStream $outputStream -TimeoutSec $TimeoutSec -MinBytesAfterTimeout $MinBytesAfterTimeout
+        Copy-DownloadStream -InputStream $inputStream -OutputStream $outputStream -TimeoutSec $TimeoutSec -MinBytesAfterTimeout $MinBytesAfterTimeout -MinRateBps $MinRateBps
     } finally {
         if ($outputStream) { $outputStream.Dispose() }
         if ($inputStream) { $inputStream.Dispose() }
@@ -417,11 +495,11 @@ function Save-OfficialViaProxy {
 }
 
 function Save-UrlToFile {
-    param([Parameter(Mandatory = $true)][string]$Url, [Parameter(Mandatory = $true)][string]$Path, [int]$TimeoutSec = 60, [switch]$AllowProxy, [int]$MinBytesAfterTimeout = 0)
+    param([Parameter(Mandatory = $true)][string]$Url, [Parameter(Mandatory = $true)][string]$Path, [int]$TimeoutSec = 60, [switch]$AllowProxy, [int]$MinBytesAfterTimeout = 0, [int]$MinRateBps = 0)
     if ($AllowProxy) {
         $proxy = Get-SystemProxyUrl
         if ($proxy) {
-            Save-OfficialViaProxy -Url $Url -Path $Path -TimeoutSec $TimeoutSec -ProxyUrl $proxy -MinBytesAfterTimeout $MinBytesAfterTimeout
+            Save-OfficialViaProxy -Url $Url -Path $Path -TimeoutSec $TimeoutSec -ProxyUrl $proxy -MinBytesAfterTimeout $MinBytesAfterTimeout -MinRateBps $MinRateBps
             return
         }
     }
@@ -433,7 +511,7 @@ function Save-UrlToFile {
         $response = $request.GetResponse()
         $inputStream = $response.GetResponseStream()
         $outputStream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-        Copy-DownloadStream -InputStream $inputStream -OutputStream $outputStream -TimeoutSec $TimeoutSec -MinBytesAfterTimeout $MinBytesAfterTimeout
+        Copy-DownloadStream -InputStream $inputStream -OutputStream $outputStream -TimeoutSec $TimeoutSec -MinBytesAfterTimeout $MinBytesAfterTimeout -MinRateBps $MinRateBps
     } catch {
         try { $request.Abort() } catch {}
         throw
@@ -451,7 +529,8 @@ function Download-ManifestFile {
         [switch]$AllowProxy,
         [int]$TimeoutSec = 60,
         [int]$Retries = 1,
-        [int]$MinBytesAfterTimeout = 0
+        [int]$MinBytesAfterTimeout = 0,
+        [int]$MinRateBps = 0
     )
     New-Item -ItemType Directory -Force (Split-Path -Parent $Destination) | Out-Null
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("portable-sync-" + [System.Guid]::NewGuid().ToString('N') + ".tmp")
@@ -459,7 +538,7 @@ function Download-ManifestFile {
         $attempt = 0
         while ($true) {
             try {
-                Save-UrlToFile -Url $Url -Path $tmp -TimeoutSec $TimeoutSec -AllowProxy:$AllowProxy -MinBytesAfterTimeout $MinBytesAfterTimeout
+                Save-UrlToFile -Url $Url -Path $tmp -TimeoutSec $TimeoutSec -AllowProxy:$AllowProxy -MinBytesAfterTimeout $MinBytesAfterTimeout -MinRateBps $MinRateBps
                 break
             } catch {
                 $attempt++
@@ -493,7 +572,7 @@ function Download-ManifestEntry {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $useProxy = Test-ShouldUseProxyForOfficial $url
         try {
-            Download-ManifestFile -Url $url -Destination $Destination -ExpectedSha1 $ExpectedSha1 -TimeoutSec 8 -Retries 0 -AllowProxy:$useProxy -MinBytesAfterTimeout $script:OfficialMinBytes
+            Download-ManifestFile -Url $url -Destination $Destination -ExpectedSha1 $ExpectedSha1 -TimeoutSec 8 -Retries 0 -AllowProxy:$useProxy -MinBytesAfterTimeout $script:OfficialMinBytes -MinRateBps $script:OfficialMinRateBps
             return 'official'
         } catch {
             Write-Host ("[同步] 官方源不可用（{0:N1}s，{1}），改走更新服务：{2}" -f $sw.Elapsed.TotalSeconds, (Get-DownloadFailReason $_.Exception), $Rel)
@@ -501,7 +580,13 @@ function Download-ManifestEntry {
             break
         }
     }
-    Download-ManifestFile -Url (Join-UrlPath -BaseUrl $BaseUrl -Rel $Rel) -Destination $Destination -ExpectedSha1 $ExpectedSha1
+    $homeTimeout = 180
+    try {
+        if ($File -and $File.PSObject.Properties['size'] -and [int64]$File.size -gt 0) {
+            $homeTimeout = [Math]::Max(120, [Math]::Min(300, [int]([int64]$File.size / 131072) + 60))
+        }
+    } catch { $homeTimeout = 180 }
+    Download-ManifestFile -Url (Join-UrlPath -BaseUrl $BaseUrl -Rel $Rel) -Destination $Destination -ExpectedSha1 $ExpectedSha1 -TimeoutSec $homeTimeout
     return 'home'
 }
 
@@ -917,8 +1002,9 @@ function Disable-DuplicateMods {
     $moved = 0
     Get-ChildItem -LiteralPath $mods -File -Filter '*.jar' -ErrorAction SilentlyContinue | ForEach-Object {
         $rel = $_.FullName.Substring($Root.Length).TrimStart('\', '/') -replace '\\', '/'
+        if ($managedPaths.Contains($rel)) { return }
         $digest = Get-Sha1 -Path $_.FullName
-        if ($managedSha1.ContainsKey($digest) -and -not $managedPaths.Contains($rel)) {
+        if ($managedSha1.ContainsKey($digest)) {
             $dest = Move-ToDisabledDir -Path $_.FullName -DisabledDir $disabled
             Write-Host "[修复] 已按 SHA1 归档旧重复 mod：$rel -> $dest"
             $script:DuplicateMoved++
@@ -954,29 +1040,38 @@ Set-Location -LiteralPath $instanceRoot
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch { }
 
 $manifestUrls = @(Read-UpdateUrls -Root $instanceRoot -Override $ManifestUrl)
-# 同一局域网访问自家公网地址常常没有 NAT 回环；有 LAN 备用地址时优先探测私网，
-# 外网用户失败后仍会回到原公网地址。
+$statePath = Join-Path $instanceRoot '.portable-sync-state.json'
+$state = $null
+if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+    try { $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $state = $null }
+}
+$lastGood = ''
+if ([string]::IsNullOrWhiteSpace($ManifestUrl) -and $state) {
+    $lastGood = [string](Get-PropertyValue -Object $state -Name 'lastManifestUrl' -Default (Get-PropertyValue -Object $state -Name 'manifestUrl' -Default ''))
+}
 if ([string]::IsNullOrWhiteSpace($ManifestUrl)) {
-    $privateUrls = @($manifestUrls | Where-Object {
-        try { Test-LocalOrPrivateHost ([Uri]$_).Host } catch { $false }
-    })
-    $publicUrls = @($manifestUrls | Where-Object { $privateUrls -notcontains $_ })
-    $manifestUrls = @($privateUrls + $publicUrls)
+    $manifestUrls = @(Get-OrderedManifestUrls -Urls $manifestUrls -LastGood $lastGood)
 }
 Write-Host ("[同步] 清单候选：" + (($manifestUrls | ForEach-Object { Get-MaskedUrl $_ }) -join '；'))
 $detectedProxy = Get-SystemProxyUrl
 if ($detectedProxy) {
     Write-Host ("[同步] 已检测到系统代理 {0}，官方源走代理；家宽更新服务始终直连。" -f (Get-ProxyDescription $detectedProxy))
 } else {
-    Write-Host '[同步] 未检测到系统代理，官方源直连（国内较慢会在 8 秒内回落更新服务）。'
+    Write-Host '[同步] 未检测到系统代理，官方源直连（太慢会在约 8 秒内回落更新服务）。'
+    if ($state -and [bool](Get-PropertyValue -Object $state -Name 'skipOfficial' -Default $false)) {
+        Set-OfficialSkip
+        Write-Host '[同步] 上次官方源偏慢，本轮直接走更新服务。检测到代理后会再试官方源。'
+    }
 }
 $manifest = $null
 $manifestText = $null
 $selectedManifestUrl = $null
 $lastManifestError = $null
 foreach ($candidate in $manifestUrls) {
+    $probeTimeout = Get-ProbeTimeoutSec -Url $candidate
+    $retries = if ($probeTimeout -le 2) { 0 } else { 1 }
     try {
-        $candidateText = Read-UrlUtf8Text -Url $candidate -TimeoutSec 8 -Retries 1
+        $candidateText = Read-UrlUtf8Text -Url $candidate -TimeoutSec $probeTimeout -Retries $retries
         $candidateManifest = $candidateText | ConvertFrom-Json
         if (-not $candidateManifest.files) { throw 'manifest 缺少 files。' }
         $manifestText = $candidateText
@@ -1004,21 +1099,20 @@ if (-not $manifest) {
     }
 }
 if (-not $manifest) {
-    throw ("清单获取失败：" + $lastManifestError.Message + "；已尝试 " + $manifestUrls.Count + " 个更新地址。若同一局域网，请确认 UPDATE-URL-LAN.txt 中的服机地址；若在外网，请确认 TCP 18088 已转发。")
+    throw ("清单获取失败：" + $lastManifestError.Message + "；已尝试 " + $manifestUrls.Count + " 个更新地址。请确认当前更新地址可达，以及路由器已把更新端口转到服机。")
 }
 $manifestUrl = [string]$selectedManifestUrl
-if ($manifestUrl -ne [string]$manifestUrls[0]) { Write-Host "[同步] 已切换到可用备用地址：$(Get-MaskedUrl $manifestUrl)" }
+if (-not [string]::IsNullOrWhiteSpace($lastGood) -and $manifestUrl -eq $lastGood) {
+    Write-Host "[同步] 沿用上次可用更新地址：$(Get-MaskedUrl $manifestUrl)"
+} elseif ($manifestUrl -ne [string]$manifestUrls[0]) {
+    Write-Host "[同步] 已切换到可用备用地址：$(Get-MaskedUrl $manifestUrl)"
+}
 if (-not $manifest.files) { throw 'manifest 缺少 files。' }
 
 $slash = $manifestUrl.LastIndexOf('/')
 if ($slash -lt 0) { throw "manifest URL 格式异常：$manifestUrl" }
 $baseUrl = $manifestUrl.Substring(0, $slash + 1)
-$statePath = Join-Path $instanceRoot '.portable-sync-state.json'
-$state = $null
-if (Test-Path -LiteralPath $statePath -PathType Leaf) {
-    try { $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $state = $null }
-}
-$script:InitialSync = -not $state
+$script:InitialSync = -not $state -or -not (Get-PropertyValue -Object $state -Name 'files' -Default $null)
 $previousMap = ConvertTo-FileMap -Files (Get-PropertyValue -Object $state -Name 'files' -Default @())
 # key 是小写化的，删除旧文件时要还原状态文件里的原始大小写（大小写敏感卷才找得到文件）。
 $previousRelByKey = @{}
@@ -1026,6 +1120,13 @@ foreach ($item in @(Get-PropertyValue -Object $state -Name 'files' -Default @())
     if ($item -and $item.path) { $previousRelByKey[(Normalize-RelKey ([string]$item.path))] = Normalize-Rel ([string]$item.path) }
 }
 $newMap = ConvertTo-FileMap -Files $manifest.files
+$verified = @{}
+$rawVerified = Get-PropertyValue -Object $state -Name 'verified' -Default $null
+if ($rawVerified) {
+    foreach ($prop in $rawVerified.PSObject.Properties) {
+        try { $verified[(Normalize-RelKey $prop.Name)] = $prop.Value } catch {}
+    }
+}
 $preserveChangeGlobs = Get-ArrayValue -Object $manifest -Name 'preserveLocalChangeGlobs' -Default @()
 $preserveDeletionGlobs = Get-ArrayValue -Object $manifest -Name 'preserveLocalDeletionGlobs' -Default @()
 $forceDeleteGlobs = Get-ArrayValue -Object $manifest -Name 'forceDeleteGlobs' -Default @()
@@ -1074,11 +1175,23 @@ foreach ($file in @($manifest.files)) {
     $target = Join-SafeRelativePath -Root $instanceRoot -Rel $rel
     $expected = ([string]$file.sha1).ToLowerInvariant()
     $exists = Test-Path -LiteralPath $target -PathType Leaf
-    $currentHash = if ($exists) { Get-Sha1 -Path $target } else { "" }
-    if ($exists -and $currentHash -eq $expected) { $skipped++; continue }
-
     $hadPrevious = $previousMap.ContainsKey($relKey)
     $previousHash = if ($hadPrevious) { [string]$previousMap[$relKey] } else { "" }
+    $manifestSize = $null
+    if ($file.PSObject.Properties['size']) { $manifestSize = $file.size }
+    $verifiedEntry = $null
+    if ($verified.ContainsKey($relKey)) { $verifiedEntry = $verified[$relKey] }
+    if ($exists -and (Test-LooksLikeCurrentFile -Path $target -Expected $expected -ManifestSize $manifestSize -PreviousHash $previousHash -Verified $verifiedEntry)) {
+        $verified[$relKey] = Get-FileVerifyRecord -Path $target -Sha1 $expected
+        $skipped++
+        continue
+    }
+    $currentHash = if ($exists) { Get-Sha1 -Path $target } else { "" }
+    if ($exists -and $currentHash -eq $expected) {
+        $verified[$relKey] = Get-FileVerifyRecord -Path $target -Sha1 $expected
+        $skipped++
+        continue
+    }
     $forceSync = Test-GlobMatch -Rel $rel -Globs $forceSyncGlobs
     if (-not $exists -and $hadPrevious -and $preservePlayerCustomizations -and -not $forceSync -and (Test-GlobMatch -Rel $rel -Globs $preserveDeletionGlobs)) {
         Write-Host "[保留玩家删除] $rel"
@@ -1104,6 +1217,7 @@ foreach ($file in @($manifest.files)) {
             if ($adopt.Mode -eq 'move') { Move-Item -LiteralPath $adopt.Path -Destination $target -Force }
             else { Copy-Item -LiteralPath $adopt.Path -Destination $target -Force }
             if ((Get-Sha1 -Path $target) -eq $expected) {
+                $verified[$relKey] = Get-FileVerifyRecord -Path $target -Sha1 $expected
                 Write-Host "[接管本地文件] $rel"
                 $adopted++
                 continue
@@ -1114,6 +1228,7 @@ foreach ($file in @($manifest.files)) {
     if ($exists) { Backup-FileIfExists -Path $target -Rel $rel -BackupRoot $backupRoot }
     try {
         $source = Download-ManifestEntry -File $file -BaseUrl $baseUrl -Destination $target -ExpectedSha1 $expected -Rel $rel
+        $verified[$relKey] = Get-FileVerifyRecord -Path $target -Sha1 $expected
         if ($source -eq 'official') { Write-Host "[官方源] $rel" } else { Write-Host "[更新] $rel" }
         $downloaded++
     } catch {
@@ -1184,17 +1299,42 @@ Apply-ServerList -Root $instanceRoot -Manifest $manifest -BackupRoot $backupRoot
 Apply-LauncherProfile -Root $instanceRoot -Manifest $manifest -BackupRoot $backupRoot
 Show-LauncherHints -Root $instanceRoot
 if ([bool](Get-PropertyValue -Object $cleanup -Name 'removeConnectorCache' -Default $true)) { Remove-ConnectorRuntimeCache -Root $instanceRoot }
-if ([bool](Get-PropertyValue -Object $cleanup -Name 'disableDuplicateMods' -Default $true)) { $script:DuplicateMoved = 0; Disable-DuplicateMods -Root $instanceRoot -Manifest $manifest }
+if ([bool](Get-PropertyValue -Object $cleanup -Name 'disableDuplicateMods' -Default $true)) {
+    $extras = @()
+    $modsDir = Join-Path $instanceRoot 'mods'
+    if (Test-Path -LiteralPath $modsDir -PathType Container) {
+        $managedModPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($item in @($manifest.files)) {
+            $mr = Normalize-Rel ([string]$item.path)
+            if ($mr -like 'mods/*.jar') { [void]$managedModPaths.Add($mr) }
+        }
+        $extras = @(Get-ChildItem -LiteralPath $modsDir -File -Filter '*.jar' -ErrorAction SilentlyContinue | Where-Object {
+            $rel = $_.FullName.Substring($instanceRoot.Length).TrimStart('\', '/') -replace '\\', '/'
+            -not $managedModPaths.Contains($rel)
+        })
+    }
+    if ($extras.Count -gt 0 -or $downloaded -gt 0 -or $adopted -gt 0 -or $removed -gt 0 -or $script:InitialSync) {
+        $script:DuplicateMoved = 0
+        Disable-DuplicateMods -Root $instanceRoot -Manifest $manifest
+    }
+}
 if ([bool](Get-PropertyValue -Object $cleanup -Name 'disableLauncherRepairIndex' -Default $true)) { Disable-LauncherRepairIndex -Roots @($PSScriptRoot, $instanceRoot) }
 
+$verifiedOut = [ordered]@{}
+foreach ($key in @($verified.Keys)) {
+    if ($newMap.ContainsKey($key)) { $verifiedOut[$key] = $verified[$key] }
+}
 $stateOut = [ordered]@{
-    format = 2
+    format = 3
     packId = Get-PropertyValue -Object $manifest -Name 'packId' -Default (Get-PropertyValue -Object $manifest -Name 'pack' -Default '')
     packName = Get-PropertyValue -Object $manifest -Name 'packName' -Default (Get-PropertyValue -Object $manifest -Name 'name' -Default '')
     version = Get-PropertyValue -Object $manifest -Name 'version' -Default ''
     manifestUrl = $manifestUrl
+    lastManifestUrl = $manifestUrl
+    skipOfficial = [bool]($script:OfficialSkip -and -not $detectedProxy)
     syncedAt = (Get-Date).ToString('s')
     files = $manifest.files
+    verified = $verifiedOut
 }
 Write-Utf8NoBom -Path $statePath -Value (($stateOut | ConvertTo-Json -Depth 8) + "`r`n")
 Write-Host "[同步] 完成。更新=$downloaded 接管=$adopted 跳过=$skipped 保留=$preserved 删除=$removed 备份=$backupRoot"

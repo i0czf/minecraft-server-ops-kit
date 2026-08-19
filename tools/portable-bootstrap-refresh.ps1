@@ -45,8 +45,7 @@ function Read-UpdateUrls {
         return @($urls.ToArray())
     }
     $relative = @(
-        'UPDATE-URL.txt', 'PORTABLE-UPDATE-URL.txt', 'TFCR-update-url.txt',
-        'UPDATE-URL-LAN.txt', 'PORTABLE-UPDATE-URL-LAN.txt'
+        'UPDATE-URL.txt', 'PORTABLE-UPDATE-URL.txt', 'TFCR-update-url.txt'
     )
     foreach ($base in @($Root, $ToolsRoot)) {
         foreach ($rel in $relative) {
@@ -110,10 +109,10 @@ function Save-DirectFile {
 }
 
 function Test-ManifestUrl {
-    param([string]$Url)
+    param([string]$Url, [int]$TimeoutSec = 8)
     $temp = Join-Path ([IO.Path]::GetTempPath()) ('portable-manifest-' + [guid]::NewGuid().ToString('N') + '.json')
     try {
-        Save-DirectFile -Url $Url -Path $temp -TimeoutSec 8
+        Save-DirectFile -Url $Url -Path $temp -TimeoutSec $TimeoutSec
         $manifest = Get-Content -LiteralPath $temp -Raw -Encoding UTF8 | ConvertFrom-Json
         return ($null -ne $manifest -and $null -ne $manifest.files)
     } catch {
@@ -152,11 +151,31 @@ if ($urls.Count -eq 0) {
     Write-Host '[更新器] 未找到更新地址，跳过自刷新。'
     exit 0
 }
-$urls = @(@($urls | Where-Object { Test-PrivateUpdateUrl $_ }) + @($urls | Where-Object { -not (Test-PrivateUpdateUrl $_) }))
+$lastGood = ''
+$statePath = Join-Path $instanceRoot '.portable-sync-state.json'
+if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+    try {
+        $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($state.lastManifestUrl) { $lastGood = [string]$state.lastManifestUrl }
+        elseif ($state.manifestUrl) { $lastGood = [string]$state.manifestUrl }
+    } catch {}
+}
+$ordered = New-Object System.Collections.Generic.List[string]
+$seenUrl = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+$addUrl = {
+    param([string]$Value)
+    $v = ([string]$Value).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($v) -and $seenUrl.Add($v)) { [void]$ordered.Add($v) }
+}
+if (-not [string]::IsNullOrWhiteSpace($lastGood) -and -not (Test-PrivateUpdateUrl $lastGood)) { & $addUrl $lastGood }
+$publicUrls = @($urls | Where-Object { -not (Test-PrivateUpdateUrl $_) })
+$candidates = if ($publicUrls.Count -gt 0) { $publicUrls } else { @($urls) }
+foreach ($u in $candidates) { & $addUrl $u }
+$urls = @($ordered)
 $selected = ''
 $selectedIndex = -1
 for ($i = 0; $i -lt $urls.Count; $i++) {
-    if (Test-ManifestUrl -Url ([string]$urls[$i])) {
+    if (Test-ManifestUrl -Url ([string]$urls[$i]) -TimeoutSec 8) {
         $selected = [string]$urls[$i]
         $selectedIndex = $i
         break
@@ -166,7 +185,7 @@ if ([string]::IsNullOrWhiteSpace($selected)) {
     Write-Host '[更新器] 更新源暂时不可达，跳过自刷新；本地同步器会继续尝试备用地址。'
     exit 0
 }
-if ($selectedIndex -gt 0) { Write-Host '[更新器] 已切换到备用更新地址（通常是局域网地址）。' }
+if ($selectedIndex -gt 0) { Write-Host '[更新器] 已切换到备用更新地址。' }
 $base = $selected.Substring(0, $selected.LastIndexOf('/'))
 $names = @('player-update-generic.ps1', 'player-update-generic.py', 'portable-stage-daemon.ps1', 'portable-stage-daemon.py', 'portable-bootstrap-refresh.ps1', 'macOS-sync.command', 'Windows-sync.bat')
 foreach ($name in $names) {
