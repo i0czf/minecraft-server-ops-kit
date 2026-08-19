@@ -9,10 +9,13 @@
 - `chatimage` 模式把 ChatImage `CICode` 放进可见消息的悬停内容，安装对应客户端模组的玩家可在聊天栏预览远程图片，并点击同一个预览项打开大图；若配置了 `publicBaseUrl`，本地/局域网图床对象会映射到公链同名对象。
 - 图片同源/同内容缓存、失败回退和有界队列，避免媒体处理阻塞 QQ WebSocket。
 
-## 实际效果
+## 实服截图
 
-- 已补入 NeoForge 1.21.1 / 21.1.235 实服的普通图片与表情包预览截图，见 [真实界面演示](https://github.com/i0czf/minecraft-server-ops-kit/blob/main/docs/live-ui-demo.md)、[PF-GUGUBot 功能核查](https://github.com/i0czf/minecraft-server-ops-kit/blob/main/docs/PF-GUGUBot%E5%8A%9F%E8%83%BD%E6%A0%B8%E6%9F%A5%E4%B8%8E%E8%B7%9F%E8%BF%9B%E6%96%B9%E6%A1%88.md) 和 [QQ 图片转图床说明](https://github.com/i0czf/minecraft-server-ops-kit/blob/main/docs/qq-image-host-%E8%BD%AC%E5%9B%BE%E5%BA%8A.md)。发布正文使用完整 URL，避免 GitHub Release 页面按错误的相对路径解析。
-- 截图素材位于 `docs/assets/qq-chatimage-image-preview.png` 与 `docs/assets/qq-chatimage-sticker-preview.png`，用于说明 `CICode` 预览和`[图片]`/`[表情包]`语义区分。
+NeoForge 1.21.1 / 21.1.235。普通图片标 `[图片]`，表情包标 `[表情包]`，悬停 `CICode` 可预览。配置与排障见 [QQ 图片转图床说明](https://github.com/i0czf/minecraft-server-ops-kit/blob/main/docs/qq-image-host-%E8%BD%AC%E5%9B%BE%E5%BA%8A.md)。
+
+![QQ 普通图片的 ChatImage 预览](https://github.com/i0czf/minecraft-server-ops-kit/raw/main/docs/assets/qq-chatimage-image-preview.png)
+
+![QQ 表情包的 ChatImage 预览](https://github.com/i0czf/minecraft-server-ops-kit/raw/main/docs/assets/qq-chatimage-sticker-preview.png)
 
 ## 配置要点
 

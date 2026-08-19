@@ -9,14 +9,9 @@
 - 可选皮肤头像：安装 ChatImage 后，悬停名字前的 `●` 预览该角色头像，复用现有皮肤同步和图床链路。图床或客户端没有 ChatImage 时，文字 ID 仍正常显示。
 - 默认一人一号、再绑即改绑；`requireSeenOnServer=true` 时必须先进过服。绑定数据写在 `logs/qq-player-binds.json`，属于运行时数据，不要提交到仓库。
 
-## 实际效果
+## 实服截图
 
-NeoForge 1.21.1 / 21.1.235 实服截图。QQ 侧头像和群名已打码，只保留命令、回执和公屏预览。
-
-- 功能说明：[QQ 号与游戏 ID 绑定](https://github.com/i0czf/minecraft-server-ops-kit/blob/main/docs/qq-player-bind-%E6%B8%B8%E6%88%8FID%E7%BB%91%E5%AE%9A.md)
-- 界面汇总：[真实界面演示](https://github.com/i0czf/minecraft-server-ops-kit/blob/main/docs/live-ui-demo.md)
-- QQ 绑定命令：[docs/assets/qq-player-bind-qq-command.jpg](https://github.com/i0czf/minecraft-server-ops-kit/blob/main/docs/assets/qq-player-bind-qq-command.jpg)
-- 游戏公屏与头像预览：[docs/assets/qq-player-bind-minecraft-preview.png](https://github.com/i0czf/minecraft-server-ops-kit/blob/main/docs/assets/qq-player-bind-minecraft-preview.png)
+NeoForge 1.21.1 / 21.1.235。QQ 侧头像和群名已打码。命令与配置见 [QQ 号与游戏 ID 绑定](https://github.com/i0czf/minecraft-server-ops-kit/blob/main/docs/qq-player-bind-%E6%B8%B8%E6%88%8FID%E7%BB%91%E5%AE%9A.md)。后续提醒、游戏 `@` 和 `!转发` 见 [v0.3.1](https://github.com/i0czf/minecraft-server-ops-kit/releases/tag/v0.3.1)。
 
 ![QQ 群里绑定游戏 ID](https://github.com/i0czf/minecraft-server-ops-kit/raw/main/docs/assets/qq-player-bind-qq-command.jpg)
 

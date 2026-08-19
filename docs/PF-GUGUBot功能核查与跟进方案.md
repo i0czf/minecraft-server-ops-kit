@@ -23,13 +23,7 @@
 
 本次还补上了 QQ 图片事件中常见的 `summary`、`subType`/`sub_type` 与 GIF/WebP/APNG 后缀判断，避免把表情包错误标成普通图片。已验证图床上传、公开地址读取、删除清理、自动转存、图片/表情包标签渲染，以及 `chatimage` 模式下远程公链 URL 生成 `CICode`；代码现把 `CICode` 放在同一可见消息组件的悬停内容中，并将局域网/游戏内图床对象按文件名映射到 `publicBaseUrl` 作为点击大图地址。消息转发仍使用有界单线程队列，以保证多段消息的顺序，重复图片则命中缓存。
 
-### 实际游戏内预览截图
-
-以下是本次真实 NeoForge 1.21.1 / 21.1.235 服务端的 ChatImage 预览结果：普通 QQ 图片显示为`[图片]`，QQ 表情包显示为`[表情包]`，两者均由公网图链驱动，玩家客户端直接触发预览。
-
-![QQ 普通图片的 ChatImage 游戏内预览实测](assets/qq-chatimage-image-preview.png)
-
-![QQ 表情包的 ChatImage 游戏内预览实测](assets/qq-chatimage-sticker-preview.png)
+实服 ChatImage 预览图见 [v0.2.0](https://github.com/i0czf/minecraft-server-ops-kit/releases/tag/v0.2.0)。
 
 ## 结论先行
 

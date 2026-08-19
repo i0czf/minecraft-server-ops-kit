@@ -87,17 +87,9 @@ java -cp tmp/java-classes QQConsoleBridge --bind-selftest
 
 预期输出为 `PASS player-bind selftest`。自测只校验游戏 ID 格式、QQ/ID 绑定解析、序列化往返和临时文件写入，不会启动 QQ 桥或连接 OneBot。
 
-## 实服测试截图
+## 实服截图
 
-NeoForge 1.21.1 / 21.1.235 实服。QQ 侧头像和群名已打码；截图只保留命令、绑定回执、游戏公屏和头像预览，不含 QQ 号、群号、域名、IP 或密钥。
-
-群里先查自己还没绑，再发 `！绑定 Enggoal`，机器人确认已绑定：
-
-![QQ 群里绑定游戏 ID](assets/qq-player-bind-qq-command.jpg)
-
-绑定后的群消息进入游戏：公屏显示群名片和游戏 ID，悬停 `●` 预览该角色皮肤头像：
-
-![游戏公屏显示绑定 ID 并悬停预览皮肤头像](assets/qq-player-bind-minecraft-preview.png)
+绑定回执和公屏头像见 [v0.3.0](https://github.com/i0czf/minecraft-server-ops-kit/releases/tag/v0.3.0)。提醒、游戏 `@` 和转发开关见 [v0.3.1](https://github.com/i0czf/minecraft-server-ops-kit/releases/tag/v0.3.1)。
 
 ## 回滚
 
