@@ -56,9 +56,12 @@ rem before the sync runs. Best-effort: jars are unlocked now (game not started y
 if exist "%PORTABLE_SCRIPT_DIR%\portable-stage-daemon.ps1" powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PORTABLE_SCRIPT_DIR%\portable-stage-daemon.ps1" -InstanceDir "%PORTABLE_INSTANCE_DIR%" -Mode Promote
 
 set "PORTABLE_PY="
-where py >nul 2>nul && set "PORTABLE_PY=py -3"
-if not defined PORTABLE_PY where python >nul 2>nul && set "PORTABLE_PY=python"
+rem where.exe succeeding is not enough: Windows Store python/py stubs
+rem return 9009 when actually launched. Probe with a one-liner first.
+py -3 -c "import sys" >nul 2>nul && set "PORTABLE_PY=py -3"
+if not defined PORTABLE_PY python -c "import sys" >nul 2>nul && set "PORTABLE_PY=python"
 if defined PORTABLE_PY if exist "%PORTABLE_SCRIPT_DIR%\player-update-generic.py" goto :SyncWithPython
+:SyncWithPowerShell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PORTABLE_SCRIPT_DIR%\player-update-generic.ps1" -InstanceDir "%PORTABLE_INSTANCE_DIR%" -NoPause
 set "code=%ERRORLEVEL%"
 goto :AfterSync
@@ -66,6 +69,11 @@ goto :AfterSync
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Write-Host '[同步] 使用 Python 同步器'"
 %PORTABLE_PY% "%PORTABLE_SCRIPT_DIR%\player-update-generic.py" --instance-dir "%PORTABLE_INSTANCE_DIR%"
 set "code=%ERRORLEVEL%"
+if "%code%"=="9009" (
+  set "PORTABLE_PY="
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Write-Host '[同步] Python 无法启动（退出码 9009，多为微软商店假入口），改用 PowerShell'"
+  goto :SyncWithPowerShell
+)
 :AfterSync
 if not "%code%"=="0" goto :SyncFailed
 
