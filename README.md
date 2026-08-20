@@ -29,46 +29,49 @@
 
 **QQ 群**：开服 / 聊天 / 进退服 / 成就 / 崩溃 / 备份通知；群友查询、管理执行；高危确认码和审计；可选 AI 助手。QQ 与游戏 ID 绑定后，公屏显示游戏名，游戏里 @游戏ID 会点到对应 QQ；管理员可用 !转发 立刻停双向聊天，用 !绑定提醒 控制未绑定轻提醒。可选图床 + ChatImage 预览、模组发布事务、DDNS。QQ / LLBot 本体不随仓库分发。详见 [绑定说明](docs/qq-player-bind-游戏ID绑定.md)、[图床说明](docs/qq-image-host-转图床.md)。
 
+**AI 多媒体**：QQ 当前消息、引用消息和合并转发里的原视频可由 Qwen3.7 Flash 覆盖完整时间轴；可选 Qwen Audio ASR 与画面并行读取音轨，再由默认 DeepSeek 汇总。取不到原视频才退回少量关键帧，媒体内容不能授权服务器操作。详见 [视频画面、音轨与 DeepSeek 汇总](docs/qq-video-audio-ai.md)。
+
 **备份与诊断**：定时 / 手动备份、ZIP 校验、恢复冒烟、影子服试车、卡顿取证、错误指纹、事故复盘、运维时间线、BlueMap 时光机。扫地僧、配方和要素查询等可选。高风险能力在公版模板里默认关闭。
 
 ## 快速开始
 
-1. 把仓库放到服务端根目录，或用构建器生成 dist/ 下的公版包再解压。新服可以还没有 server.properties。
-2. 运行 一键脚本\一键便携-初始化配置.bat。第一次建议逐项确认。结果写入本机私有文件 	ools\portable-pack.json 和 	ools\ops-config.json，不要提交或外发。
-3. 需要浏览器运维时运行 一键脚本\一键便携-启动Web控制面板.bat。首次会生成 	mp\portable-web-panel.token，默认地址 http://127.0.0.1:58080/。远程优先走 SSH / VPN。
-4. 启动服务端：一键脚本\一键便携-启动服务端.bat。日常启停、运维监控和 RCON 也可走根目录控制面板。
-5. 发布玩家更新：确认主客户端和更新源后，运行 一键脚本\一键便携-生成规范导入包.bat 和 一键脚本\一键便携-开启更新服务.bat。公网更新必须用你自己授权的域名、端口和访问策略。
+1. 把仓库放到服务端根目录，或用构建器生成 `dist/` 下的公版包再解压。新服可以还没有 `server.properties`。
+2. 运行 `一键脚本\一键便携-初始化配置.bat`。第一次建议逐项确认。结果写入本机私有文件 `tools\portable-pack.json` 和 `tools\ops-config.json`，不要提交或外发。
+3. 需要浏览器运维时运行根目录 `一键便携-Web控制面板.bat`，或 `一键脚本\一键便携-启动Web控制面板.bat`。首次会生成 `tmp\portable-web-panel.token`，默认地址 `http://127.0.0.1:58080/`。远程优先走 SSH / VPN。
+4. 启动服务端：`一键脚本\一键便携-启动服务端.bat`。日常启停、运维监控和 RCON 也可走根目录控制面板。
+5. 发布玩家更新：确认主客户端和更新源后，运行 `一键脚本\一键便携-生成规范导入包.bat` 和 `一键脚本\一键便携-开启更新服务.bat`。公网更新必须用你自己授权的域名、端口和访问策略。
 
 完整手册：[docs/portable-server-kit.md](docs/portable-server-kit.md)。
 
 ## 目录
 
-`	ext
+```text
 .
 ├─ 一键便携-控制面板.bat     根目录唯一的控制面板入口
+├─ 一键便携-Web控制面板.bat  根目录 Web 面板快捷入口
 ├─ 一键脚本/                 可单独双击的一键入口
 ├─ tools/                    脚本与公版模板（*.example.json）
 ├─ docs/                     功能说明；截图原件在 docs/assets/
 ├─ PUBLIC-RELEASE-AUDIT.md   公版纳入 / 排除边界
 └─ .gitignore                私有配置和运行目录保护
-`
+```
 
 ## 构建公版
 
-`powershell
-powershell -NoProfile -ExecutionPolicy Bypass 
-  -File .\tools\build-portable-server-kit.ps1 
-  -Version 20260816-public
-`
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\tools\build-portable-server-kit.ps1 `
+  -Version 20260820-170600 -Lite -NoUpdateChannel
+```
 
-构建器会做白名单、私有文件门禁、路径 / 密钥扫描、脚本编码和语法检查。产物在 dist/，默认不进 Git。
+构建器会做白名单、私有文件门禁、路径 / 密钥扫描、脚本编码和语法检查。产物在 `dist/`，默认不进 Git。发布者还可传 `-PrivacyReferenceRoot <实机根目录>`，只读收集实机身份值与公版交叉比对，命中时只报文件、不回显私密值；`-NoUpdateChannel` 用于审计构建，避免提前覆盖本地更新通道。
 
-`powershell
+```powershell
 python -m compileall -q .\tools
 New-Item -ItemType Directory -Force .\tmp\javac-check | Out-Null
-javac --add-modules jdk.httpserver -encoding UTF-8 
+javac --add-modules jdk.httpserver -encoding UTF-8 `
   -d .\tmp\javac-check .\tools\QQConsoleBridge.java
-`
+```
 
 ## 隐私与安全
 

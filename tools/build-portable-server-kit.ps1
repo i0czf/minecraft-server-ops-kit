@@ -1,7 +1,9 @@
 ﻿param(
     [string]$Version = "",
     [switch]$Private,
-    [switch]$Lite
+    [switch]$Lite,
+    [string]$PrivacyReferenceRoot = "",
+    [switch]$NoUpdateChannel
 )
 
 if ($Lite -and $Private) { throw '精简版是公开包的变体（去 LLBot 本体），不能与 -Private 同时使用。' }
@@ -11,6 +13,17 @@ try { $Host.UI.RawUI.WindowTitle = '生成便携工具包' } catch { }
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $Root
 if ([string]::IsNullOrWhiteSpace($Version)) { $Version = Get-Date -Format 'yyyyMMdd-HHmmss' }
+$PrivacyRoot = $Root
+if (-not [string]::IsNullOrWhiteSpace($PrivacyReferenceRoot)) {
+    $PrivacyRoot = [IO.Path]::GetFullPath($PrivacyReferenceRoot)
+    if (-not (Test-Path -LiteralPath $PrivacyRoot -PathType Container)) {
+        throw "隐私交叉比对目录不存在：$PrivacyRoot"
+    }
+    $privacyRootItem = Get-Item -LiteralPath $PrivacyRoot -Force -ErrorAction Stop
+    if ($privacyRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "隐私交叉比对目录不能是重解析点：$PrivacyRoot"
+    }
+}
 
 function Copy-KitFile([string]$Rel, [string]$KitRoot) {
     $src = Join-Path $Root $Rel
@@ -32,6 +45,7 @@ function Test-GenericPublicValue([string]$Value) {
     if ($v -match 'CHANGE-ME|example\.com|^(true|false|server-pack|my-server-pack|minecraft-server|portable-pack)$') { return $true }
     if ($v -match '(?i)^(localhost|127\.0\.0\.1|0\.0\.0\.0|::1)(:\d+)?$') { return $true }
     if ($v -match '(?i)^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(/|$)') { return $true }
+    if ($v -match '(?i)^https://littleskin\.cn/csl/?$') { return $true }
     return $false
 }
 
@@ -57,10 +71,11 @@ function Add-PrivateComparisonValue($Values, $Value) {
 
 function Test-PublicKitPrivacy([string]$KitRoot) {
     foreach ($forbidden in @(
-        'tools\portable-pack.json', 'tools\ops-config.json',
+        'tools\portable-pack.json', 'tools\ops-config.json', 'tools\portable-web-panel.json',
         'tools\toolkit-update-source.txt', 'PRIVATE-WARNING.txt',
         'server.properties', 'ops.json', 'usercache.json', 'usernamecache.json',
-        'whitelist.json', 'banned-ips.json', 'banned-players.json', '.update-server-token'
+        'whitelist.json', 'banned-ips.json', 'banned-players.json', '.update-server-token',
+        'tmp\portable-web-panel.token'
     )) {
         if (Test-Path -LiteralPath (Join-Path $KitRoot $forbidden)) {
             throw "公开包隐私门禁失败：禁止出现 $forbidden"
@@ -92,8 +107,8 @@ function Test-PublicKitPrivacy([string]$KitRoot) {
         }
     }
 
-    # 用主目录真实配置做交叉比对，但只判断命中、不在输出中显示私有值。
-    $privatePackPath = Join-Path $Root 'tools\portable-pack.json'
+    # 可用独立实机目录做交叉比对；只判断命中，不在输出中显示私有值。
+    $privatePackPath = Join-Path $PrivacyRoot 'tools\portable-pack.json'
     $privateValues = New-Object System.Collections.Generic.List[string]
     $privatePlayerNames = New-Object System.Collections.Generic.List[string]
     if (Test-Path -LiteralPath $privatePackPath -PathType Leaf) {
@@ -111,7 +126,7 @@ function Test-PublicKitPrivacy([string]$KitRoot) {
             [string]$privatePack.pcl.instanceName
         )
     }
-    $privateOpsPath = Join-Path $Root 'tools\ops-config.json'
+    $privateOpsPath = Join-Path $PrivacyRoot 'tools\ops-config.json'
     if (Test-Path -LiteralPath $privateOpsPath -PathType Leaf) {
         $privateOps = Get-Content -LiteralPath $privateOpsPath -Raw -Encoding UTF8 | ConvertFrom-Json
         Add-PrivateComparisonValue $privateValues @(
@@ -120,7 +135,12 @@ function Test-PublicKitPrivacy([string]$KitRoot) {
             [string]$privateOps.discord.channelId, [string]$privateOps.discord.proxyHost,
             [string]$privateOps.ddns.domain, [string]$privateOps.ddns.subDomain,
             [string]$privateOps.ddns.loginToken, [string]$privateOps.ai.playerView.cameraPlayer,
-            [string]$privateOps.ai.bluemap.chromePath, [string]$privateOps.ai.webProxy,
+            [string]$privateOps.ai.bluemap.chromePath, [string]$privateOps.ai.bluemap.skinApiRoot,
+            [string]$privateOps.ai.webProxy,
+            [string]$privateOps.imageHost.uploadUrl, [string]$privateOps.imageHost.publicBaseUrl,
+            [string]$privateOps.imageHost.minecraftBaseUrl, [string]$privateOps.imageHost.lanBaseUrl,
+            [string]$privateOps.imageHost.root, [string]$privateOps.imageHost.tokensFile,
+            [string]$privateOps.imageHost.token,
             [string]$privateOps.modRelease.clientModsDirectory,
             [string]$privateOps.backupSchedule.backupPrefix
         )
@@ -149,7 +169,7 @@ function Test-PublicKitPrivacy([string]$KitRoot) {
             }
         }
     }
-    $serverPropertiesPath = Join-Path $Root 'server.properties'
+    $serverPropertiesPath = Join-Path $PrivacyRoot 'server.properties'
     if (Test-Path -LiteralPath $serverPropertiesPath -PathType Leaf) {
         foreach ($line in @(Get-Content -LiteralPath $serverPropertiesPath -Encoding UTF8 -ErrorAction SilentlyContinue)) {
             if ($line -match '^rcon\.password=(.+)$' -and -not [string]::IsNullOrWhiteSpace($matches[1])) {
@@ -157,13 +177,13 @@ function Test-PublicKitPrivacy([string]$KitRoot) {
             }
         }
     }
-    $updateTokenPath = Join-Path $Root '.update-server-token'
+    $updateTokenPath = Join-Path $PrivacyRoot '.update-server-token'
     if (Test-Path -LiteralPath $updateTokenPath -PathType Leaf) {
         $tokenValue = (Get-Content -LiteralPath $updateTokenPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue).Trim()
         Add-PrivateComparisonValue $privateValues $tokenValue
     }
     foreach ($identityFile in @('ops.json','whitelist.json','usercache.json','usernamecache.json','banned-players.json')) {
-        $identityPath = Join-Path $Root $identityFile
+        $identityPath = Join-Path $PrivacyRoot $identityFile
         if (-not (Test-Path -LiteralPath $identityPath -PathType Leaf)) { continue }
         try {
             $identityJson = Get-Content -LiteralPath $identityPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -183,7 +203,7 @@ function Test-PublicKitPrivacy([string]$KitRoot) {
             }
         } catch { }
     }
-    $bannedIpsPath = Join-Path $Root 'banned-ips.json'
+    $bannedIpsPath = Join-Path $PrivacyRoot 'banned-ips.json'
     if (Test-Path -LiteralPath $bannedIpsPath -PathType Leaf) {
         try {
             foreach ($entry in @(Get-Content -LiteralPath $bannedIpsPath -Raw -Encoding UTF8 | ConvertFrom-Json)) {
@@ -191,17 +211,17 @@ function Test-PublicKitPrivacy([string]$KitRoot) {
             }
         } catch { }
     }
-    $llbotDataPath = Join-Path $Root 'tools\LLBot-CLI-win-x64\bin\llbot\data'
+    $llbotDataPath = Join-Path $PrivacyRoot 'tools\LLBot-CLI-win-x64\bin\llbot\data'
     if (Test-Path -LiteralPath $llbotDataPath -PathType Container) {
         Get-ChildItem -LiteralPath $llbotDataPath -File -Filter 'config_*.json' -ErrorAction SilentlyContinue | ForEach-Object {
             if ($_.BaseName -match '^config_(\d+)$') { Add-PrivateComparisonValue $privateValues $matches[1] }
         }
     }
-    $privateUpdateSource = Join-Path $Root 'tools\toolkit-update-source.txt'
+    $privateUpdateSource = Join-Path $PrivacyRoot 'tools\toolkit-update-source.txt'
     if (Test-Path -LiteralPath $privateUpdateSource -PathType Leaf) {
         Add-PrivateComparisonValue $privateValues (Get-Content -LiteralPath $privateUpdateSource -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
     }
-    $pmhqPath = Join-Path $Root 'tools\LLBot-CLI-win-x64\bin\pmhq\pmhq_config.json'
+    $pmhqPath = Join-Path $PrivacyRoot 'tools\LLBot-CLI-win-x64\bin\pmhq\pmhq_config.json'
     if (Test-Path -LiteralPath $pmhqPath -PathType Leaf) {
         try {
             $pmhq = Get-Content -LiteralPath $pmhqPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -287,7 +307,7 @@ function Test-NewConfigureMenu([string]$KitRoot) {
     }
     $qqBridgeText = Get-Content -LiteralPath (Join-Path $KitRoot 'tools\QQConsoleBridge.java') -Raw -Encoding UTF8
     # list/backup 现在按 firstWord/word 解析，保留带参数的 backup force；门禁按实际语义检查，避免仅因变量名变化误报。
-    foreach ($needle in @('class QQConsoleBridge', 'send_group_msg', 'command.equalsIgnoreCase("list")', 'config.adminIds', 'isAuthorizedAdmin', 'msg.role.equalsIgnoreCase("owner")', 'word.equalsIgnoreCase("backup")', 'runAiAgent', '-SuppressWatchNotification')) {
+    foreach ($needle in @('class QQConsoleBridge', 'send_group_msg', 'command.equalsIgnoreCase("list")', 'config.adminIds', 'isAuthorizedAdmin', 'msg.role.equalsIgnoreCase("owner")', 'word.equalsIgnoreCase("backup")', 'runAiAgent', '-SuppressWatchNotification', '--media-selftest', 'runAudioTranscription', 'supportsVideo()', 'video_url', '原始媒体已由视觉模型')) {
         if (-not $qqBridgeText.Contains($needle)) {
             throw "QQConsoleBridge.java 不是预期的 QQ 桥接版本，缺少标记：$needle"
         }
@@ -446,6 +466,19 @@ function Test-NewConfigureMenu([string]$KitRoot) {
     if ([bool]$opsExample.ai.codexActionsEnabled) {
         throw '公开运维模板必须默认关闭 Codex 服务器动作。'
     }
+    if ([string]$opsExample.ai.provider -ne 'deepseek') {
+        throw '公开运维模板的最终回答模型必须默认回到 deepseek。'
+    }
+    if (-not $opsExample.ai.audioTranscription -or [bool]$opsExample.ai.audioTranscription.enabled) {
+        throw '公开运维模板必须包含音轨转写配置，并默认关闭以避免未授权费用。'
+    }
+    if (-not $opsExample.ai.providers.qwen -or -not [bool]$opsExample.ai.providers.qwen.vision -or
+        -not [bool]$opsExample.ai.providers.qwen.video) {
+        throw '公开运维模板的 Qwen 视觉预设必须声明图片和原生视频能力。'
+    }
+    if ([string]$opsExample.ai.providers.qwen.model -ne 'qwen3.7-flash') {
+        throw '公开运维模板的性价比视频预处理档必须是 qwen3.7-flash。'
+    }
 }
 
 function Reset-KitStage([string]$Target, [string]$ExpectedName) {
@@ -485,6 +518,7 @@ New-Item -ItemType Directory -Force $dist | Out-Null
 
 $files = @(
     '一键便携-控制面板.bat',
+    '一键便携-Web控制面板.bat',
     '一键脚本\一键便携-启动Web控制面板.bat',
     '一键脚本\一键便携-停止Web控制面板.bat',
     '一键脚本\一键便携-初始化配置.bat',
@@ -513,6 +547,7 @@ $files = @(
     'docs\web-panel-网页远程运维.md',
     'docs\portable-server-kit.md',
     'docs\qq-ai-provider-switch.md',
+    'docs\qq-video-audio-ai.md',
     'tools\portable-pack.example.json',
     'tools\portable-ops-config.example.json',
     'tools\configure-portable-server.ps1',
@@ -885,7 +920,7 @@ Copy-Item -LiteralPath $zip -Destination $latestZip -Force
 Write-Host "[便携] 工具包已生成：$zip"
 Write-Host "[便携] 最新副本：$latestZip"
 
-if ($Lite) {
+if ($Lite -and -not $NoUpdateChannel) {
     # 精简包同时发布到工具包更新通道：更新服务运行时对外提供 /kit/ 无令牌下载，
     # 外发工具包的「检查更新」按钮即从这里获取新版本与更新日志。
     $kitChannel = Join-Path $Root 'modpack-public\kit-update'
