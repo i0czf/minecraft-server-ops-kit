@@ -345,7 +345,7 @@
                        "notify":  true
                    },
     "ai":  {
-               "_说明":  "AI 运维助手（OpenAI 兼容智能体）。开启后群主/管理员 @机器人 或用 !问/!ask \u003c问题\u003e 触发，机器人用 function calling 真实调用工具多轮查证后回帖。【换模型只改一处】把下面的 provider 改成 providers 里的某个键名即可（默认 deepseek），接口地址/模型/密钥都跟着走；改完重跑一次运维监控（一键脚本\\一键便携-启动所有运维.bat，或重启服务器）就生效——它发现本文件变了会自动重编译重启 QQ 桥。生效后群里发 !ai 可查当前用的哪家、密钥有没有拿到、还能切到哪些；也可命令行自查：java -cp tmp/java-classes QQConsoleBridge --ai-status tools/ops-config.json。visionProvider 是「当前模型不支持看图时，带图提问临时改用的那家」，留空则带图时忽略图片并如实告知。要接新厂商就在 providers 里加一个键：任何 OpenAI 兼容的 chat/completions 接口都行，但必须支持 function calling（工具调用），否则智能体查不了服务器。apiKey 强烈建议留空、改用 apiKeyEnv 指定的环境变量，避免明文密钥进配置文件（打包时也会被强制清空）。showUsage=true 时每条 AI 回答末尾附一行本次用量（token 数取自接口返回的 usage，agent 多步会累加）和折合人民币的花费；DeepSeek V4 直连预设会按官方页面自动同步空闲/高峰价，普通单价只作回退；usdToCny 是美元计价模型折人民币的汇率。本机 Codex/Grok CLI 后端走登录态、接口不返回 token 数，那两种模式不带用量尾巴。",
+               "_说明":  "AI 运维助手（OpenAI 兼容智能体）。开启后群主/管理员 @机器人 或用 !问/!ask \u003c问题\u003e 触发，机器人用 function calling 真实调用工具多轮查证后回帖。【换模型只改一处】provider 决定最终回答模型（默认 deepseek），visionProvider 只负责当前模型看不了的图片/视频；视频音轨由 audioTranscription 可选转写，画面与音轨并行完成后作为不可信媒体证据交给最终模型汇总。改完重跑一次运维监控即生效，群里发 !ai 可核对真实流水线。apiKey 强烈建议留空、改用 apiKeyEnv 指定的环境变量；公版模板和打包产物不得携带真实密钥。showUsage=true 时分别显示默认模型、视觉模型和 ASR 的真实用量/费用。",
                "enabled":  false,
                "officialPricing":  {
                                       "_说明":  "仅对直连 api.deepseek.com 的 V4 Flash/Pro 生效。启动时及每 refreshMinutes 分钟读取 DeepSeek 官方中文价目页；校验失败时保留当前配置价。",
@@ -356,6 +356,14 @@
                                   },
                "provider":  "deepseek",
                "visionProvider":  "qwen",
+               "audioTranscription":  {
+                                          "_说明":  "视频视觉模型只读画面；开启后用专用 ASR 读取视频音轨，与画面分析并行，再交给 provider 指定的最终模型汇总。provider 只复用 providers 中对应预设的 API Key。公版默认关闭，确认模型、地区和费用后再开启。",
+                                          "enabled":  false,
+                                          "provider":  "qwen",
+                                          "apiUrl":  "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+                                          "model":  "qwen-audio-3.0-asr-flash",
+                                          "pricePerSecondCny":  0.00022
+                                      },
                "providers":  {
                                  "_说明":  "模型预设表：键名自取，被上面的 provider / visionProvider 引用。vision=true 表示该模型能直接读图片（不确定就填 false，带图提问会自动转给视觉备选）。带 ✎ 的 model 只是示例，实际以各家官方文档的模型 ID 为准；改完发 !ai 就能看到有没有生效。【计费】普通预设的 priceIn/priceCacheIn/priceOut 是每百万 token 的回退单价，currency 填 CNY 或 USD（USD 按上面的 usdToCny 折人民币）；DeepSeek 直连预设另外有 pricePeakIn/pricePeakCacheIn/pricePeakOut，官方同步成功后按北京时区每次请求的峰谷时段选价。token 数取自接口自己返回的 usage 字段（不是本地估算），一次提问 agent 跑几步就累加几次。价格填错只影响显示的金额，不影响真实扣费；没填价就只报 token 不报钱。各家会调价，以官方计费页为准。",
                                  "deepseek":  {
@@ -393,12 +401,13 @@
                                                       "pricePeakOut":  27.0
                                                   },
                                  "qwen":  {
-                                              "_说明":  "阿里云百炼（通义千问）兼容模式，支持看图，可作视觉备选。密钥是百炼控制台 sk- 开头的 API-KEY。",
+                                              "_说明":  "阿里云百炼（通义千问）兼容模式，支持看图和原生视频输入；默认用 Flash 档作为性价比视觉预处理器。密钥建议只放 DASHSCOPE_API_KEY 环境变量。",
                                               "apiUrl":  "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
                                               "apiKey":  "",
                                               "apiKeyEnv":  "DASHSCOPE_API_KEY",
-                                              "model":  "qwen3.7-plus",
+                                              "model":  "qwen3.7-flash",
                                               "vision":  true,
+                                              "video":  true,
                                               "currency":  "CNY",
                                               "priceIn":  2,
                                               "priceOut":  8
@@ -463,14 +472,14 @@
                                                      "priceOut":  6
                                                  },
                                  "grok-local":  {
-                                                    "_说明":  "本机 Grok CLI 后端：切到此项后 QQ 提问会调用本机 grok --prompt-file（单轮 headless），使用本机 grok login 登录态，不写 API Key、不走 xAI HTTP。默认 --permission-mode plan 只读排查。commandPath 留空自动探测 %USERPROFILE%\\.grok\\bin\\grok.exe。需完整运维工具时切回 deepseek/grok 等 HTTP 预设。",
+                                                    "_说明":  "本机 Grok Build CLI 可选后端：使用本机 OAuth 登录态，不写 API Key；图片经 ACP 输入，代理从 ai.webProxy 显式传递，CLI 内置工具禁用，服务器动作仍由桥接白名单/RCON 网关复核。默认最终模型仍是 deepseek。",
                                                     "mode":  "grok-cli",
                                                     "commandPath":  "",
                                                     "apiUrl":  "",
                                                     "apiKey":  "",
                                                     "apiKeyEnv":  "",
-                                                    "model":  "grok-4.5",
-                                                    "vision":  false
+                                                    "model":  "grok-4.6",
+                                                    "vision":  true
                                                 },
                                  "openrouter":  {
                                                     "_说明":  "OpenRouter 中转：一个密钥打通各家。✎model 用「厂商/模型」形式。",

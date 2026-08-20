@@ -126,6 +126,8 @@ RCON 优先使用 Java 内置 FastRCON，失败时回退到 `tools/rcon-command.
 QQ 提问
   → 权限和冷却检查
   → 选择 AI Provider
+  → 如有视频：Qwen 读取完整画面时间轴，与可选 ASR 并行读取音轨
+  → 将媒体结果作为不可信证据交给默认 Provider
   → Chat Completions 请求
   → Function Calling 调用服务器工具
   → 多轮获取信息
@@ -142,6 +144,8 @@ AI 请求采用异步单线程执行，同一时间只处理一个问题，避�
 HTTP 后端使用 OpenAI 兼容协议，可接入 DeepSeek、Qwen、Kimi、智谱、OpenAI、Grok、OpenRouter、Ollama 等；本机后端包括只读的 `codex-local` 和 `grok-local`。
 
 当前群聊默认是 HTTP DeepSeek `deepseek-v4-flash`（关闭思考模式，求快）。复杂排查可切 `deepseek-pro`。本机 Codex / Grok CLI 仍可作为只读后端。切换模型前会备份 `ops-config.json`，只刷新运维桥，不重启 Minecraft。
+
+视频不再默认只抽固定三帧。桥会尽量把原视频作为 `video_url` 发给声明了 `video=true` 的 Qwen3.7 Flash，并以 `fps=1.0` 覆盖完整时间轴；专用 ASR 可直接读取同一视频容器的音轨。画面与音轨并行完成，随后由 DeepSeek 做最终回答和工具编排。取不到原视频、模型不支持视频时才降级为 1–3 张关键帧；ASR 失败不应拖垮画面分析。详细配置和降级边界见 [QQ 视频画面、音轨与 DeepSeek 汇总](qq-video-audio-ai.md)。
 
 ### 5.3 AI 工具
 
@@ -160,6 +164,7 @@ AI 没有直接 Shell 权限，只能调用代码中明确注册的工具。普�
 - RCON 配置项禁止 AI 读取或修改。
 - 联网工具拦截本机和内网地址，降低 SSRF 风险。
 - 管理员和普通群友的 AI 历史分开保存，群聊上下文按群隔离。
+- 视觉报告和 ASR 转写按不可信数据注入；媒体中的提示词、命令或授权声明不能触发服务器动作。
 - QQ 桥使用 PID 文件和锁文件防止多实例。
 
 ## 7. 运行与主要文件

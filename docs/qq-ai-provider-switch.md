@@ -1,6 +1,6 @@
 # QQ 群 AI 后端切换
 
-QQ 桥的 AI 入口仍然是 `tools/ops-config.json` 的 `ai.provider`。本地优先时预置了这些后端：
+QQ 桥的最终回答入口仍然是 `tools/ops-config.json` 的 `ai.provider`，公版默认 `deepseek`。图片/视频预处理由 `ai.visionProvider` 单独选择，视频音轨则由可选的 `ai.audioTranscription` 处理；Grok Build 保留为可切换后端，不再是默认汇总模型。
 
 - `grok-local`：**本机 Grok CLI**（推荐不调 API 时用）。走 `grok --prompt-file` 单轮 headless，使用本机 `grok login` 登录态，配置里不写 API Key。默认 `--permission-mode plan` 只读。
 - `codex-local`：本机 Codex CLI，使用本机 Codex 登录，默认只读；当前固定 `gpt-5.6-luna` + `max` 推理强度，通过 `codex exec --json` 读取 `turn.completed.usage`，保留用量/计费尾巴和耗时尾巴。
@@ -37,7 +37,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\set-ai-provider.ps1 -Provider g
 
 4. 群里发 `!ai`，应显示「本机 Grok CLI」且密钥为「使用本机 Grok 登录」。
 
-`commandPath` 留空时自动探测 `%USERPROFILE%\.grok\bin\grok.exe`，再回退 PATH 中的 `grok`。模型默认 `grok-4.5`，可按本机 `grok models` 调整 `ai.providers.grok-local.model`。
+`commandPath` 留空时自动探测 `%USERPROFILE%\.grok\bin\grok.exe`，再回退 PATH 中的 `grok`。模型默认 `grok-4.6`，可按本机 `grok models` 调整 `ai.providers.grok-local.model`；`ai.webProxy` 会显式传给子进程，避免常驻桥没有继承后来启动的代理环境。
 
 ## 首次使用 Grok HTTP（调 xAI API）
 
@@ -64,8 +64,9 @@ powershell -ExecutionPolicy Bypass -File .\tools\set-ai-provider.ps1 -Provider g
 若把 cwd 设为服务端根目录并允许多轮工具，Grok agent 会扫 `bluemap/`、`world/` 等巨量目录，plain 输出又只在结束时打印，表现就是「处理中」卡满 120–180 秒后超时。当前实现改为：
 
 1. cwd = `tmp/grok-qq-workspace`（空目录）
-2. `--tools none` + `--max-turns 1`
+2. 禁用 CLI 工具、子代理和后台自更新，限制为单轮结构化输出
 3. 崩溃列表 / 日志末尾等由 `QQConsoleBridge` 读入 prompt
+4. 图片先在本机压缩后通过 ACP content block 传入；视频仍走 Qwen 画面报告与可选 ASR，再交给 Grok 汇总
 
 ## 用量与花费（回答末尾的小尾巴）
 
@@ -82,7 +83,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\set-ai-provider.ps1 -Provider g
 - **DeepSeek 官方价自动同步**：`ai.officialPricing.enabled=true` 后，QQ 桥启动时及每 `refreshMinutes` 分钟读取官方价目页，校验模型、价格和北京时间峰值时段后更新 V4 Flash/Pro；校验失败保留当前回退价，不影响 AI 请求。每次模型响应按响应时刻的北京时间选择峰/谷价；`!ai` 可查看当前价与同步状态。
 - **单价填在哪**：普通预设使用 `ai.providers.<预设>` 下的 `priceIn` / `priceCacheIn` / `priceOut`（每百万 token）与 `currency`（`CNY` 或 `USD`）。DeepSeek V4 还支持 `pricePeakIn` / `pricePeakCacheIn` / `pricePeakOut` 作为峰值回退价；官方同步成功后会覆盖直连 V4 预设的运行时价格。美元按 `ai.usdToCny` 折人民币，`priceCacheIn` 不填就按 `priceIn` 算。
 - **没填价**：只报 token，金额位置写明去哪填，不会按估价编一个数字。本机 ollama 填 0 则显示「¥0（本机模型，不计费）」。
-- **本机 CLI**：`codex-local` 从 `turn.completed.usage` 读取输入、缓存输入和输出 token；`grok-local` 因本机接口不返回 token 数，不带用量尾巴。两者的耗时都由 QQ 桥本地计时器统计。
+- **本机 CLI**：`codex-local` 从 `turn.completed.usage` 读取输入、缓存输入和输出 token；`grok-local` 的主回答使用 SuperGrok 订阅额度，不伪装成按 token 账单。若同时用了 Qwen 视频/ASR，页脚会单列这些 API 费用。两者耗时都由 QQ 桥本地计时器统计。
 - `codex-local` 当前锁定 `gpt-5.6-luna` + `max`，价格为输入 `$1`、缓存输入 `$0.1`、输出 `$6`（每百万 token）；页脚显示的是按 API 价格折算的“约”值，ChatGPT 登录态的实际账户扣费/额度以账号计划为准。
 - 单价随时会变，以各家官方计费页为准；填错只影响显示的金额，不影响真实扣费。发 `!ai` 可看当前预设的单价。
 

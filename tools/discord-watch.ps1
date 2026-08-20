@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$ConfigPath = ".\tools\ops-config.json"
 )
 

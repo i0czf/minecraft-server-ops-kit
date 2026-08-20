@@ -3,8 +3,9 @@ import os
 import pathlib
 import stat
 import sys
-import time
 import zipfile
+
+DETERMINISTIC_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
 if len(sys.argv) != 3:
     raise SystemExit("usage: zip-with-unix-mode.py <source_dir> <zip_path>")
@@ -41,8 +42,9 @@ files = sorted(p for p in source.rglob("*") if p.is_file())
 with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
     for idx, path in enumerate(files, 1):
         rel = path.relative_to(source).as_posix()
-        st = path.stat()
-        info = zipfile.ZipInfo(rel, time.localtime(st.st_mtime)[:6])
+        # ZIP's DOS timestamp cannot represent dates before 1980. Pinning every
+        # entry to the epoch makes repeated builds byte-for-byte reproducible.
+        info = zipfile.ZipInfo(rel, DETERMINISTIC_ZIP_TIMESTAMP)
         info.create_system = 3
         mode = 0o100755 if rel.endswith(".command") else 0o100644
         info.external_attr = (mode & 0xFFFF) << 16
