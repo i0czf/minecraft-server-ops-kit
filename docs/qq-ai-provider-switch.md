@@ -1,6 +1,6 @@
 # QQ 群 AI 后端切换
 
-QQ 桥的最终回答入口仍然是 `tools/ops-config.json` 的 `ai.provider`，公版默认 `deepseek`。图片/视频预处理由 `ai.visionProvider` 单独选择，视频音轨则由可选的 `ai.audioTranscription` 处理；Grok Build 保留为可切换后端，不再是默认汇总模型。
+QQ 桥的最终回答入口仍然是 `tools/ops-config.json` 的 `ai.provider`，公版默认 `deepseek`。图片/视频预处理由 `ai.visionProvider` 单独选择；QQ 语音与视频音轨共用可选的 `ai.audioTranscription` 做文字转写，QQ 独立语音还可由 `ai.audioUnderstanding` 判断唱歌、音乐和环境声，证据再交给最终模型分析。Grok Build 保留为可切换后端，不再是默认汇总模型。
 
 - `grok-local`：**本机 Grok CLI**（推荐不调 API 时用）。走 `grok --prompt-file` 单轮 headless，使用本机 `grok login` 登录态，配置里不写 API Key。默认 `--permission-mode plan` 只读。
 - `codex-local`：本机 Codex CLI，使用本机 Codex 登录，默认只读；当前固定 `gpt-5.6-luna` + `max` 推理强度，通过 `codex exec --json` 读取 `turn.completed.usage`，保留用量/计费尾巴和耗时尾巴。
@@ -66,7 +66,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\set-ai-provider.ps1 -Provider g
 1. cwd = `tmp/grok-qq-workspace`（空目录）
 2. 禁用 CLI 工具、子代理和后台自更新，限制为单轮结构化输出
 3. 崩溃列表 / 日志末尾等由 `QQConsoleBridge` 读入 prompt
-4. 图片先在本机压缩后通过 ACP content block 传入；视频仍走 Qwen 画面报告与可选 ASR，再交给 Grok 汇总
+4. 图片先在本机压缩后通过 ACP content block 传入；视频仍走 Qwen 画面报告与可选 ASR；QQ 语音经 OneBot/本机 Silk 解码后，按命令只做 ASR 或并行生成 ASR + Omni 声音报告，再把不可信文字证据交给最终模型
 
 ## 用量与花费（回答末尾的小尾巴）
 
@@ -99,4 +99,4 @@ grok models
 - `grok` HTTP：需要可用的 `XAI_API_KEY`。
 - `codex-local`：需要先在本机完成 Codex 登录。
 
-`!ai` / `--ai-status` 只显示密钥来源与状态，不显示密钥内容。
+回复 QQ 语音发送 `!转写` 可单独验证 ASR，发送 `!听语音` 可验证 ASR + Omni 声音理解；机器人不会自动识别群里所有语音。`!ai` / `--ai-status` 只显示密钥来源与状态，不显示密钥内容。
