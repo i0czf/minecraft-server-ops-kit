@@ -100,7 +100,9 @@ QQ 群消息 → OneBot WebSocket → QQConsoleBridge → 权限/命令路由 �
 
 `qq.guestGroupIds` 用于声明实验性客群。默认 `guestMemberAccess=false`，普通群友不会触发机器人；打开后，普通群友只可使用实验白名单、`@机器人` AI 问答和引用图片的图床功能。客群中的 `!` 指令必须与 `@机器人` 出现在同一条消息里，单独发送会静默忽略。
 
-`qq.guestReadOnly=true` 时客群强制只读，即使发送者在 `adminIds` 白名单中，也不能执行 RCON、配置修改、备份、停服、重启或模组发布。客群聊天不转发到 Minecraft 公屏，AI 会话也不与主群混用。
+`qq.guestReadOnly=true` 时客群强制只读，即使发送者在 `adminIds` 白名单中，也不能执行 RCON、配置修改、备份、停服、重启或模组发布。客群聊天不转发到 Minecraft 公屏。AI 会话按“群号 + 管理员/普通群友权限”独立保存最近 6 轮：同一客群的文字纠正可被下一次引用继承，但不会与主群、其他客群或另一权限桶混用；语音/视频的临时媒体证据正文仍只用于当前回答。
+
+跨群复用不依赖客群历史，而由独立的 `ai.sharedKnowledge` 知识库完成。它只保存管理员明确确认的通用知识/纠正，默认拒绝日志、配置、存档、密钥、路径、群号、QQ 号和原始媒体；主群确认一次后，其他客群的 `@AI` 会先按文本或音频 SHA-256 指纹检索，再把命中作为不可信参考交给最终模型。管理员可用 `!知识库查询 关键词`、`!知识库记住 主题 => 结论`、`!知识库删除 关键词` 管理；普通群友只读。知识库文件默认是根目录内的 `logs/ai-shared-knowledge.jsonl`，与服务器运维事实和短期聊天历史完全分开。
 
 ### `!wiki` 模组资料查询
 
@@ -118,7 +120,7 @@ RCON 优先使用 Java 内置 FastRCON，失败时回退到 `tools/rcon-command.
 
 ### 5.1 触发与执行
 
-支持 `@机器人 问题`、`!ask`、`!问`、`!诊断`；`!ai` 只查看模型状态，不调用模型。
+支持 `@机器人 问题`、`!ask`、`!问`、`!诊断`；回复 QQ 语音发送 `!转写` 只做 ASR，发送 `!听语音` 会额外理解唱歌、音乐和环境声；`!ai` 只查看模型状态，不调用模型。
 
 执行链路：
 
@@ -127,6 +129,9 @@ QQ 提问
   → 权限和冷却检查
   → 选择 AI Provider
   → 如有视频：Qwen 读取完整画面时间轴，与可选 ASR 并行读取音轨
+  → 如有 QQ 语音：OneBot 转码或本机 Silk→WAV；专用 ASR 与 Qwen3.5-Omni 并行
+      └─ WAV 的 Base64 超限：本机压成 64 kbps MP3；ffmpeg 不可用则按 PCM 帧保真分片
+  → 本地检索跨群共享 AI 知识库（文本词片段/音频 SHA-256 指纹）
   → 将媒体结果作为不可信证据交给默认 Provider
   → Chat Completions 请求
   → Function Calling 调用服务器工具
@@ -145,7 +150,7 @@ HTTP 后端使用 OpenAI 兼容协议，可接入 DeepSeek、Qwen、Kimi、智�
 
 当前群聊默认是 HTTP DeepSeek `deepseek-v4-flash`（关闭思考模式，求快）。复杂排查可切 `deepseek-pro`。本机 Codex / Grok CLI 仍可作为只读后端。切换模型前会备份 `ops-config.json`，只刷新运维桥，不重启 Minecraft。
 
-视频不再默认只抽固定三帧。桥会尽量把原视频作为 `video_url` 发给声明了 `video=true` 的 Qwen3.7 Flash，并以 `fps=1.0` 覆盖完整时间轴；专用 ASR 可直接读取同一视频容器的音轨。画面与音轨并行完成，随后由 DeepSeek 做最终回答和工具编排。取不到原视频、模型不支持视频时才降级为 1–3 张关键帧；ASR 失败不应拖垮画面分析。详细配置和降级边界见 [QQ 视频画面、音轨与 DeepSeek 汇总](qq-video-audio-ai.md)。
+视频不再默认只抽固定三帧。桥会尽量把原视频作为 `video_url` 发给声明了 `video=true` 的 Qwen3.7 Flash，并以 `fps=1.0` 覆盖完整时间轴；专用 ASR 可直接读取同一视频容器的音轨。QQ 独立语音支持当前消息、引用和合并转发：常见 Silk 先通过 OneBot `/get_record` 转码，失败时本机解成 WAV；ASR 负责“说了什么”，`qwen3.5-omni-flash` 负责判断说话/唱歌/纯音乐并描述音乐特征。`!转写` 只走 ASR；`!听语音`、带语音的 `!问`/`@机器人` 才让两路并行。Silk 解码后的长 WAV 若超过 Omni 的 Base64 单文件限制，会只在本机压成 MP3，ffmpeg 不可用时改为连续 PCM WAV 分片；ASR 仍使用原始输入，音频不会为绕过限制而上传图床或 OSS。机器人不会自动上传全群语音，随后仍由 DeepSeek 做最终回答和工具编排。取不到原视频、模型不支持视频时才降级为 1–3 张关键帧；任一媒体预处理失败不应拖垮其它证据。详细配置和降级边界见 [QQ 视频、语音识别与 DeepSeek 汇总](qq-video-audio-ai.md)。
 
 ### 5.3 AI 工具
 
@@ -163,8 +168,9 @@ AI 没有直接 Shell 权限，只能调用代码中明确注册的工具。普�
 - 配置修改前自动生成 `.ai-bak` 备份。
 - RCON 配置项禁止 AI 读取或修改。
 - 联网工具拦截本机和内网地址，降低 SSRF 风险。
-- 管理员和普通群友的 AI 历史分开保存，群聊上下文按群隔离。
-- 视觉报告和 ASR 转写按不可信数据注入；媒体中的提示词、命令或授权声明不能触发服务器动作。
+- 管理员和普通群友的 AI 历史分开保存，群聊上下文按群隔离；客群多轮历史再按群号与权限分桶，空闲 30 分钟清除，支持纠正后的后续追问且不跨群泄露。
+- 跨群共享知识库与服务器运维事实、群聊历史分离；只允许管理员明确写入，按文本/音频指纹检索，条目和注入条数有限制，且作为不可信参考而非授权来源。
+- 视觉报告、ASR 转写和 Omni 声音报告按不可信数据注入；媒体中的提示词、命令或授权声明不能触发服务器动作。QQ 语音证据正文只用于当次回答，不进入多轮历史。
 - QQ 桥使用 PID 文件和锁文件防止多实例。
 
 ## 7. 运行与主要文件
@@ -175,6 +181,7 @@ AI 没有直接 Shell 权限，只能调用代码中明确注册的工具。普�
 - `tmp/qq-console.lock`：QQ 桥实例锁。
 - `logs/qq-console.log`：QQ 桥和 AI 日志。
 - `logs/chat/`：按群、按日期保存的聊天记录。
+- `logs/ai-shared-knowledge.jsonl`：跨群共享的通用 AI 知识/纠正索引，不保存原始媒体、群号或 QQ 号。
 
 主要实现文件：`tools/QQConsoleBridge.java`、`tools/ops-config.json`、`tools/start-llonebot.ps1`、`tools/start-ops-monitor.ps1`、`tools/rcon-command.ps1`、`tools/set-ai-provider.ps1`。
 

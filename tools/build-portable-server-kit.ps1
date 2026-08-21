@@ -307,7 +307,7 @@ function Test-NewConfigureMenu([string]$KitRoot) {
     }
     $qqBridgeText = Get-Content -LiteralPath (Join-Path $KitRoot 'tools\QQConsoleBridge.java') -Raw -Encoding UTF8
     # list/backup 现在按 firstWord/word 解析，保留带参数的 backup force；门禁按实际语义检查，避免仅因变量名变化误报。
-    foreach ($needle in @('class QQConsoleBridge', 'send_group_msg', 'command.equalsIgnoreCase("list")', 'config.adminIds', 'isAuthorizedAdmin', 'msg.role.equalsIgnoreCase("owner")', 'word.equalsIgnoreCase("backup")', 'runAiAgent', '-SuppressWatchNotification', '--media-selftest', 'runAudioTranscription', 'supportsVideo()', 'video_url', '原始媒体已由视觉模型')) {
+foreach ($needle in @('class QQConsoleBridge', 'send_group_msg', 'command.equalsIgnoreCase("list")', 'config.adminIds', 'isAuthorizedAdmin', 'msg.role.equalsIgnoreCase("owner")', 'word.equalsIgnoreCase("backup")', 'runAiAgent', '-SuppressWatchNotification', '--media-selftest', '--history-selftest', '--knowledge-selftest', 'runAiHistorySelftest', 'runSharedKnowledgeSelftest', 'runAudioTranscription', 'runAudioUnderstanding', 'prepareOmniAudioInputs', 'splitCanonicalPcmWav', 'OMNI_AUDIO_MP3_BITRATE_KBPS', 'audioUnderstandingAttempted', 'parseAudioUnderstandingResponse', 'AudioUnderstandingUsage', 'VOICE_UNDERSTAND_PROMPT', 'contextText', 'supportsVideo()', 'video_url', '原始媒体已由视觉模型', 'extractAudioInputs', '/get_record', 'MAX_AI_AUDIO_INPUTS', 'MAX_OMNI_AUDIO_DATA_URL_CHARS', 'isSilkAudioFile', 'decodeSilkToWav', 'silk-wasm', 'stripTransientAudioEvidence', 'appendAudioReferenceFingerprint', 'sharedKnowledgeContext', 'handleSharedKnowledgeCommand', 'word.equals("转写")', 'word.equals("听语音")')) {
         if (-not $qqBridgeText.Contains($needle)) {
             throw "QQConsoleBridge.java 不是预期的 QQ 桥接版本，缺少标记：$needle"
         }
@@ -470,7 +470,22 @@ function Test-NewConfigureMenu([string]$KitRoot) {
         throw '公开运维模板的最终回答模型必须默认回到 deepseek。'
     }
     if (-not $opsExample.ai.audioTranscription -or [bool]$opsExample.ai.audioTranscription.enabled) {
-        throw '公开运维模板必须包含音轨转写配置，并默认关闭以避免未授权费用。'
+        throw '公开运维模板必须包含 QQ 语音/视频音轨 ASR 配置，并默认关闭以避免未授权费用。'
+    }
+    if (-not $opsExample.ai.audioUnderstanding -or [bool]$opsExample.ai.audioUnderstanding.enabled) {
+        throw '公开运维模板必须包含 QQ 唱歌/音乐声音理解配置，并默认关闭以避免未授权费用。'
+    }
+    if ([string]$opsExample.ai.audioUnderstanding.model -ne 'qwen3.5-omni-flash' -or
+        [string]$opsExample.ai.audioUnderstanding.provider -ne 'qwen') {
+        throw '公开运维模板的声音理解档必须复用 qwen 密钥并使用 qwen3.5-omni-flash。'
+    }
+    if (-not $opsExample.ai.sharedKnowledge -or -not [bool]$opsExample.ai.sharedKnowledge.enabled -or
+        -not [bool]$opsExample.ai.sharedKnowledge.readEnabled -or
+        -not [bool]$opsExample.ai.sharedKnowledge.writeRequiresAdmin) {
+        throw '公开运维模板必须包含启用读取且仅管理员写入的跨群共享知识库配置。'
+    }
+    if ([string]$opsExample.ai.sharedKnowledge.path -ne 'logs/ai-shared-knowledge.jsonl') {
+        throw '公开运维模板的共享知识库路径必须是根目录内的 logs/ai-shared-knowledge.jsonl。'
     }
     if (-not $opsExample.ai.providers.qwen -or -not [bool]$opsExample.ai.providers.qwen.vision -or
         -not [bool]$opsExample.ai.providers.qwen.video) {
@@ -548,6 +563,7 @@ $files = @(
     'docs\portable-server-kit.md',
     'docs\qq-ai-provider-switch.md',
     'docs\qq-video-audio-ai.md',
+    'docs\RELEASE-NOTES-v0.4.1.md',
     'tools\portable-pack.example.json',
     'tools\portable-ops-config.example.json',
     'tools\configure-portable-server.ps1',
