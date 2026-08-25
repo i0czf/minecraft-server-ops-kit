@@ -206,6 +206,7 @@ public class QQConsoleBridge {
         //   java QQConsoleBridge --aspect <查询>                 离线验证本服要素合成查询（不连 QQ）
         //   java QQConsoleBridge --aspect-items <查询>           离线验证物品要素反查与摘要图（不连 QQ）
         //   java QQConsoleBridge --inspect-mod <查询>            离线验证本机模组 JAR 元数据（不连 QQ）
+        //   java QQConsoleBridge --mods-preview [配置路径]       离线预览分类后的模组清单（不连 QQ）
         //   java QQConsoleBridge --wiki <查询>                   离线验证模组百科查询（不连 QQ）
         //   java QQConsoleBridge --bind-selftest                 离线校验 QQ-游戏ID 绑定格式与仓库读写
         //   java QQConsoleBridge --media-selftest                离线校验视频请求、采样参数与音频格式（不联网）
@@ -217,6 +218,7 @@ public class QQConsoleBridge {
         boolean mediaSelftest = false;
         boolean historySelftest = false;
         boolean knowledgeSelftest = false;
+        boolean modListPreview = false;
         String aspectQuery = null;
         String aspectItemsQuery = null;
         String inspectModQuery = null;
@@ -236,6 +238,8 @@ public class QQConsoleBridge {
                 historySelftest = true;
             else if ("--knowledge-selftest".equals(a) || "-knowledge-selftest".equals(a))
                 knowledgeSelftest = true;
+            else if ("--mods-preview".equals(a) || "-mods-preview".equals(a))
+                modListPreview = true;
             else if ("--inspect-mod".equals(a) || "--inspect-mods".equals(a)) {
                 if (i + 1 >= args.length)
                     throw new IllegalArgumentException("--inspect-mod 后需要模组名");
@@ -301,6 +305,10 @@ public class QQConsoleBridge {
             if (inspectModQuery != null) {
                 System.out.println(bridge.toolInspectMod(
                         "{\"query\":\"" + jsonEscape(inspectModQuery) + "\"}"));
+                return;
+            }
+            if (modListPreview) {
+                System.out.println(bridge.formatModListPreview());
                 return;
             }
             if (wikiQuery != null) {
@@ -1393,7 +1401,12 @@ public class QQConsoleBridge {
             sendGroupMsg(guestGroup ? formatGuestExperimentHelp() : formatHelp(privileged, arg));
             return;
         }
-        // !wiki / ！wiki <模组名> —— 全员：查询简介与 MC百科、CurseForge、Modrinth 链接
+        // !mod / !mods / !模组列表 —— 全员：返回当前服务器 mods/*.jar 完整清单；过长时发合并转发
+        if (isModListCommand(word)) {
+            handleModListCommand();
+            return;
+        }
+       // !wiki / ！wiki <模组名> —— 全员：查询简介与 MC百科、CurseForge、Modrinth 链接
         if (word.equalsIgnoreCase("wiki") || word.equals("百科") || word.equals("模组百科")) {
             dispatchWikiLookup(command.substring(word.length()).trim());
             return;
@@ -2275,8 +2288,11 @@ public class QQConsoleBridge {
     }
 
     static boolean isGuestExperimentCommand(String command) {
+        String normalized = command == null ? "" : command.trim();
         String word = firstWord(command == null ? "" : command.trim());
-        return word.equalsIgnoreCase("help") || word.equals("帮助")
+        return normalized.equalsIgnoreCase("tps")
+                || word.equalsIgnoreCase("help") || word.equals("帮助")
+                || isModListCommand(word)
                 || word.equalsIgnoreCase("wiki") || word.equals("百科") || word.equals("模组百科")
                 || word.equalsIgnoreCase("ai") || word.equals("模型")
                 || word.equalsIgnoreCase("ask") || word.equals("问") || word.equals("诊断")
@@ -2284,6 +2300,15 @@ public class QQConsoleBridge {
                 || word.equals("绑定") || word.equalsIgnoreCase("bind")
                 || word.equals("解绑") || word.equalsIgnoreCase("unbind")
                 || word.equals("绑定查询") || word.equalsIgnoreCase("bindquery");
+    }
+
+    static boolean isModListCommand(String word) {
+        if (word == null)
+            return false;
+        return word.equalsIgnoreCase("mod") || word.equalsIgnoreCase("mods")
+                || word.equalsIgnoreCase("modlist")
+                || word.equals("模组") || word.equals("模组列表") || word.equals("模组清单")
+                || word.equals("mod列表") || word.equals("mod清单");
     }
 
     void relayQQChat(String group, String displayName, String content) {
@@ -11164,16 +11189,22 @@ public class QQConsoleBridge {
     // 完整清单装进一个可折叠的合并转发气泡，避免逐条/逐页轰炸群聊。
     void sendGroupForwardMsg(String group, String source, String summary,
             String prompt, List<String> pages) throws Exception {
+        sendGroupForwardMsg(group, source, summary, prompt, pages, "服务器要素索引");
+    }
+
+    void sendGroupForwardMsg(String group, String source, String summary,
+            String prompt, List<String> pages, String nodeName) throws Exception {
         if (pages == null || pages.isEmpty())
             throw new IOException("合并转发没有内容");
         String target = (group == null || group.isBlank()) ? config.groupId : group;
         long uin = selfId > 0 ? selfId : 10000L;
+        String safeNodeName = nodeName == null || nodeName.isBlank() ? "服务器列表" : truncate(nodeName, 80);
         StringBuilder nodes = new StringBuilder("[");
         for (int i = 0; i < pages.size(); i++) {
             if (i > 0)
                 nodes.append(',');
             nodes.append("{\"type\":\"node\",\"data\":{")
-                    .append("\"name\":\"服务器要素索引\",")
+                    .append("\"name\":\"").append(jsonEscape(safeNodeName)).append("\",")
                     .append("\"uin\":").append(uin).append(',')
                     .append("\"content\":\"").append(jsonEscape(pages.get(i))).append("\"}}");
         }
@@ -11968,6 +11999,738 @@ public class QQConsoleBridge {
         return sb.toString();
     }
 
+    List<String> readInstalledModJarNames() throws IOException {
+        Path modsDir = root.resolve("mods");
+        if (!Files.isDirectory(modsDir))
+            throw new IOException("没有 mods 目录（可能是原版服务器）");
+        List<String> names = new ArrayList<>();
+        try (var stream = Files.list(modsDir)) {
+            for (Path p : (Iterable<Path>) stream::iterator) {
+                String fn = p.getFileName().toString();
+                if (Files.isRegularFile(p) && fn.toLowerCase(java.util.Locale.ROOT).endsWith(".jar"))
+                    names.add(fn);
+            }
+        }
+        java.util.Collections.sort(names, String.CASE_INSENSITIVE_ORDER);
+        return names;
+    }
+
+    void handleModListCommand() throws Exception {
+        List<InstalledModInfo> mods;
+        try {
+            mods = readInstalledModInfos();
+        } catch (Exception ex) {
+            sendGroupMsg("[模组列表] 读取失败：" + messageOf(ex));
+            return;
+        }
+        if (mods.isEmpty()) {
+            sendGroupMsg("[模组列表] mods 目录为空，没有找到 .jar 模组。");
+            return;
+        }
+
+        String direct = formatModListOverview(mods);
+
+        // 给 QQ 普通消息留出余量；超过后只发一个可折叠的合并转发气泡。
+        if (direct.length() <= 3400) {
+            sendGroupMsg(direct);
+            return;
+        }
+
+        List<String> pages = buildModListForwardPages(mods);
+        String group = (activeReplyGroup != null && !activeReplyGroup.isBlank())
+                ? activeReplyGroup : config.groupId;
+        try {
+            sendGroupForwardMsg(group,
+                    "服务器模组分类清单",
+                    "共 " + mods.size() + " 个模组 · 按用途分类 · 点击展开",
+                    "[服务器模组分类清单]",
+                    pages,
+                    "模组分类清单");
+        } catch (Exception forwardEx) {
+            // 某些 OneBot/QQ 运行时可能未实现合并转发；仍保留完整清单，降级为少量分段文字。
+            log("模组列表合并转发失败，降级为分段文字：" + messageOf(forwardEx));
+            sendGroupMsg(group, "[模组列表] 合并转发暂不可用，改用分段文字发送完整清单。");
+            for (String page : pages)
+                sendGroupMsg(group, page);
+        }
+    }
+
+    String formatModListPreview() throws Exception {
+        List<InstalledModInfo> mods = readInstalledModInfos();
+        if (mods.isEmpty())
+            return "[模组列表] mods 目录为空，没有找到 .jar 模组。";
+        return formatModListOverview(mods);
+    }
+
+    String formatModListOverview(List<InstalledModInfo> mods) {
+        Map<ModListGroup, List<InstalledModInfo>> grouped = groupModList(mods);
+        StringBuilder out = new StringBuilder(4096);
+        out.append(buildModListPreface(mods, grouped));
+        for (ModListGroup group : ModListGroup.values()) {
+            List<InstalledModInfo> entries = grouped.get(group);
+            if (entries == null || entries.isEmpty())
+                continue;
+            out.append("\n\n").append(formatModListSection(group, entries, grouped));
+        }
+        return out.toString();
+    }
+
+    List<String> buildModListForwardPages(List<InstalledModInfo> mods) {
+        final int pageLimit = 1800;
+        Map<ModListGroup, List<InstalledModInfo>> grouped = groupModList(mods);
+        String preface = buildModListPreface(mods, grouped);
+        List<String> pages = new ArrayList<>();
+        boolean firstPage = true;
+        for (ModListGroup group : ModListGroup.values()) {
+            List<InstalledModInfo> entries = grouped.get(group);
+            if (entries == null || entries.isEmpty())
+                continue;
+
+            String sectionTitle = group.title + "（" + entries.size() + "）";
+            String sectionHint = group.hint;
+            StringBuilder current = new StringBuilder(pageLimit);
+            if (firstPage) {
+                current.append(preface).append("\n\n");
+                firstPage = false;
+            }
+            current.append(sectionTitle).append('\n').append(sectionHint);
+            for (InstalledModInfo info : entries) {
+                String entry = formatModListEntry(info, grouped);
+                if (current.length() + entry.length() + 1 > pageLimit
+                        && current.length() > sectionTitle.length() + sectionHint.length() + 2) {
+                    pages.add(current.toString());
+                    current = new StringBuilder(pageLimit);
+                    current.append(sectionTitle).append("（续）\n").append(sectionHint);
+                }
+                current.append('\n').append(entry);
+            }
+            if (current.length() > 0)
+                pages.add(current.toString());
+        }
+        return pages;
+    }
+
+    enum ModListGroup {
+        GAMEPLAY("🎮 玩法内容", "玩法", "直接增加世界、物品、生物、维度或可玩的系统。"),
+        EXTENSION("🔗 玩法扩展与兼容", "扩展/兼容", "依赖其他玩法模组，用来补充内容、联动或做兼容。"),
+        EXPERIENCE("✨ 玩家体验与信息", "玩家体验", "查询、指南、聊天、视觉和客户端交互类功能。"),
+        PERFORMANCE("⚡ 性能优化", "性能", "减少资源占用、改善服务端性能或提供性能诊断。"),
+        SERVER("🛡️ 服务器管理与本服定制", "管理/定制", "权限、安全、清理、地图服务和本服专用功能。"),
+        LIBRARY("🧩 前置与库", "前置/库", "通常不单独增加玩法，但其他模组需要它才能运行。"),
+        OTHER("📦 其他/待识别", "其他", "暂未能从本地元数据准确判断用途，保留在这里方便核对。");
+
+        final String title;
+        final String shortTitle;
+        final String hint;
+
+        ModListGroup(String title, String shortTitle, String hint) {
+            this.title = title;
+            this.shortTitle = shortTitle;
+            this.hint = hint;
+        }
+    }
+
+    static final class ModListDependency {
+        final String modId;
+        final boolean required;
+        final String versionRange;
+        final String side;
+
+        ModListDependency(String modId, boolean required, String versionRange, String side) {
+            this.modId = modId == null ? "" : modId.trim();
+            this.required = required;
+            this.versionRange = versionRange == null ? "" : versionRange.trim();
+            this.side = side == null ? "" : side.trim();
+        }
+    }
+
+    static final class InstalledModInfo {
+        final Path jar;
+        final String fileName;
+        final String modId;
+        final String displayName;
+        final String version;
+        final List<String> providedModIds;
+        final List<ModListDependency> requiredDependencies;
+        final List<ModListDependency> optionalDependencies;
+        ModListGroup group = ModListGroup.OTHER;
+        String kind = "其他";
+
+        InstalledModInfo(Path jar, String fileName, String modId, String displayName, String version,
+                List<String> providedModIds,
+                List<ModListDependency> requiredDependencies, List<ModListDependency> optionalDependencies) {
+            this.jar = jar;
+            this.fileName = fileName == null ? "" : fileName;
+            this.modId = modId == null ? "" : modId.trim();
+            this.displayName = displayName == null ? "" : displayName.trim();
+            this.version = version == null ? "" : version.trim();
+            this.providedModIds = providedModIds == null ? List.of() : List.copyOf(providedModIds);
+            this.requiredDependencies = requiredDependencies == null ? List.of() : List.copyOf(requiredDependencies);
+            this.optionalDependencies = optionalDependencies == null ? List.of() : List.copyOf(optionalDependencies);
+        }
+
+        String label() {
+            String alias = leadingModFileLabel(fileName);
+            String name = displayName.isBlank() ? (modId.isBlank() ? fileName : modId) : displayName;
+            if (alias.isBlank() || name.equalsIgnoreCase(alias))
+                return name;
+            return alias + " " + name;
+        }
+
+        String key() {
+            return modId.toLowerCase(java.util.Locale.ROOT);
+        }
+
+        boolean provides(String id) {
+            if (id == null || id.isBlank())
+                return false;
+            String wanted = id.toLowerCase(java.util.Locale.ROOT);
+            return key().equals(wanted) || providedModIds.contains(wanted);
+        }
+    }
+
+    static final Set<String> MOD_LIST_LIBRARY_IDS = Set.of(
+            "architectury", "balm", "cloth_config", "coroutil", "creativecore", "curios",
+            "ftblibrary", "ftbteams", "geckolib", "gunsmithlib", "knightlib", "lionfishapi",
+            "lodestone", "moonlight", "owo", "puzzleslib", "sophisticatedcore", "watermedia",
+            "guideme", "apexcore", "athena", "searchables");
+
+    static final Set<String> MOD_LIST_PERFORMANCE_IDS = Set.of(
+            "modernfix", "ferritecore", "lithium", "servercore", "spark");
+
+    static final Set<String> MOD_LIST_SERVER_IDS = Set.of(
+            "bluemap", "worldedit", "dummmmmmy");
+
+    static final Set<String> MOD_LIST_EXPERIENCE_IDS = Set.of(
+            "jei", "jade", "patchouli", "voicechat", "voicechat_api", "chatimage", "yes_steve_model",
+            "ysm", "watut", "waterframes", "watervision", "vista", "ftbessentials");
+
+    static final Set<String> MOD_LIST_GAMEPLAY_IDS = Set.of(
+            "slashblade", "slashbladeres", "touhou_little_maid", "touhou_little_maid_spell", "storagedrawers",
+            "waystones", "polymorph", "ironfurnaces", "ironchest", "goety", "supplementaries",
+            "sophisticatedbackpacks", "refinedstorage", "visualworkbench", "ftbultimine", "malum",
+            "twilightforest", "farmersdelight", "maidsoulkitchen", "kaleidoscope_cookery", "kaleidoscope_tavern",
+            "kaleidoscope_end", "kaleidoscope_nether", "kaleidoscope_doll", "dummmmmmy", "aquaculture",
+            "explorerscompass", "companions", "ars_nouveau", "corpse", "appliedenergistics2", "ae2",
+            "cataclysm", "ftbchunks", "tacz", "botania", "buildinggadgets", "wands", "framedblocks",
+            "elegant_countryside", "thaumcraft", "forbiddenmagic", "taintedmagic", "thaumic_tinkerer",
+            "thaumicbases", "thaumicenergistics", "thaumcraftcelestial", "nodalmechanics", "taczpackupgrader",
+            "kubejs", "refinedstorage_jei_integration", "refinedstorage_curios_integration", "twilightdelight",
+            "aquaculturedelight", "kaleidoscope_compat");
+
+    List<InstalledModInfo> readInstalledModInfos() throws IOException {
+        Path modsDir = root.resolve("mods");
+        if (!Files.isDirectory(modsDir))
+            throw new IOException("没有 mods 目录（可能是原版服务器）");
+        List<InstalledModInfo> mods = new ArrayList<>();
+        for (String name : readInstalledModJarNames()) {
+            Path jar = modsDir.resolve(name);
+            mods.add(readModListInfo(jar));
+        }
+        classifyModList(mods);
+        return mods;
+    }
+
+    InstalledModInfo readModListInfo(Path jar) {
+        String fileName = jar == null || jar.getFileName() == null ? "" : jar.getFileName().toString();
+        String metadata = "";
+        try (ZipFile zip = new ZipFile(jar.toFile())) {
+            String[] metadataEntries = {
+                    "META-INF/neoforge.mods.toml", "META-INF/mods.toml", "fabric.mod.json", "mcmod.info"
+            };
+            for (String entryName : metadataEntries) {
+                String text = readZipText(zip, entryName, 64 * 1024);
+                if (text != null && !text.isBlank()) {
+                    metadata = text;
+                    break;
+                }
+            }
+        } catch (Exception ex) {
+            // 单个 JAR 的元数据损坏不应让整张模组清单失败，文件名仍然有展示价值。
+            log("读取模组元数据失败：" + fileName + "：" + messageOf(ex));
+        }
+
+        String id = cleanModMetadata(firstTomlString(metadata, "modId"));
+        if (id.isBlank())
+            id = cleanModMetadata(firstTomlString(metadata, "modid"));
+        if (id.isBlank())
+            id = cleanModMetadata(firstJsonMetadataValue(metadata, "id"));
+        if (id.isBlank())
+            id = cleanModMetadata(firstJsonMetadataValue(metadata, "modid"));
+
+        String name = cleanModMetadata(firstTomlString(metadata, "displayName"));
+        if (name.isBlank())
+            name = cleanModMetadata(firstJsonMetadataValue(metadata, "name"));
+        String version = cleanModMetadata(firstTomlString(metadata, "version"));
+        if (version.isBlank())
+            version = cleanModMetadata(firstJsonMetadataValue(metadata, "version"));
+
+        List<String> providedIds = parseProvidedModIds(metadata, id);
+        List<ModListDependency> dependencies = parseModListDependencies(metadata, id);
+        List<ModListDependency> required = new ArrayList<>();
+        List<ModListDependency> optional = new ArrayList<>();
+        for (ModListDependency dependency : dependencies) {
+            if (dependency.required)
+                required.add(dependency);
+            else
+                optional.add(dependency);
+        }
+        return new InstalledModInfo(jar, fileName, id, name, version, providedIds, required, optional);
+    }
+
+    static List<String> parseProvidedModIds(String metadata, String primaryId) {
+        LinkedHashSet<String> ids = new LinkedHashSet<>();
+        if (primaryId != null && !primaryId.isBlank() && !primaryId.contains("${"))
+            ids.add(primaryId.toLowerCase(java.util.Locale.ROOT));
+        if (metadata == null || metadata.isBlank())
+            return new ArrayList<>(ids);
+
+        Matcher modsBlocks = Pattern.compile("(?ms)^\\s*\\[\\[mods\\]\\]\\s*(.*?)(?=^\\s*\\[\\[|\\z)")
+                .matcher(metadata);
+        while (modsBlocks.find()) {
+            String id = cleanModMetadata(firstTomlString(modsBlocks.group(1), "modId"));
+            if (!id.isBlank() && !id.contains("${") && !isFrameworkDependency(id))
+                ids.add(id.toLowerCase(java.util.Locale.ROOT));
+        }
+        String fabricId = cleanModMetadata(firstJsonMetadataValue(metadata, "id"));
+        if (!fabricId.isBlank() && !fabricId.contains("${") && !isFrameworkDependency(fabricId))
+            ids.add(fabricId.toLowerCase(java.util.Locale.ROOT));
+        String legacyId = cleanModMetadata(firstJsonMetadataValue(metadata, "modid"));
+        if (!legacyId.isBlank() && !legacyId.contains("${") && !isFrameworkDependency(legacyId))
+            ids.add(legacyId.toLowerCase(java.util.Locale.ROOT));
+        return new ArrayList<>(ids);
+    }
+
+    static List<ModListDependency> parseModListDependencies(String metadata, String primaryId) {
+        if (metadata == null || metadata.isBlank())
+            return List.of();
+        Map<String, ModListDependency> found = new LinkedHashMap<>();
+        Pattern blockPattern = Pattern.compile(
+                "(?ms)^\\s*\\[\\[dependencies\\.([^\\]]+)\\]\\]\\s*(.*?)(?=^\\s*\\[\\[|\\z)");
+        Matcher blocks = blockPattern.matcher(metadata);
+        while (blocks.find()) {
+            String owner = blocks.group(1).trim();
+            if (!primaryId.isBlank() && !owner.equalsIgnoreCase(primaryId) && !owner.contains("${"))
+                continue;
+            String block = blocks.group(2);
+            String dependencyId = cleanModMetadata(firstTomlString(block, "modId"));
+            if (dependencyId.isBlank() || isFrameworkDependency(dependencyId)
+                    || dependencyId.contains("${"))
+                continue;
+            String type = firstTomlString(block, "type").toLowerCase(java.util.Locale.ROOT);
+            String mandatory = firstTomlBoolean(block, "mandatory").toLowerCase(java.util.Locale.ROOT);
+            boolean required = "required".equals(type) || "mandatory".equals(type) || "true".equals(mandatory);
+            found.putIfAbsent(dependencyId.toLowerCase(java.util.Locale.ROOT),
+                    new ModListDependency(dependencyId, required, firstTomlString(block, "versionRange"),
+                            firstTomlString(block, "side")));
+        }
+
+        // 少数 Fabric 格式 JAR 不使用 NeoForge TOML；只取 depends/recommends 的键名，
+        // 不把 fabricloader、minecraft 等运行时本身展示给玩家。
+        parseFabricDependencyObject(metadata, "depends", true, found);
+        parseFabricDependencyObject(metadata, "recommends", false, found);
+        return new ArrayList<>(found.values());
+    }
+
+    static void parseFabricDependencyObject(String metadata, String field, boolean required,
+            Map<String, ModListDependency> found) {
+        Matcher object = Pattern.compile("(?s)\\\"" + Pattern.quote(field)
+                + "\\\"\\s*:\\s*\\{(.*?)\\}").matcher(metadata);
+        if (!object.find())
+            return;
+        Matcher key = Pattern.compile("\\\"([A-Za-z0-9_.-]+)\\\"\\s*:").matcher(object.group(1));
+        while (key.find()) {
+            String dependencyId = key.group(1);
+            if (isFrameworkDependency(dependencyId))
+                continue;
+            found.putIfAbsent(dependencyId.toLowerCase(java.util.Locale.ROOT),
+                    new ModListDependency(dependencyId, required, "", ""));
+        }
+    }
+
+    static boolean isFrameworkDependency(String id) {
+        if (id == null)
+            return true;
+        return switch (id.trim().toLowerCase(java.util.Locale.ROOT)) {
+            case "minecraft", "neoforge", "forge", "fabricloader", "fabric-api", "javafml", "loader" -> true;
+            default -> false;
+        };
+    }
+
+    static String firstTomlString(String text, String key) {
+        if (text == null || text.isBlank() || key == null || key.isBlank())
+            return "";
+        Matcher matcher = Pattern.compile("(?im)^\\s*" + Pattern.quote(key)
+                + "\\s*=\\s*\\\"([^\\\"]*)\\\"").matcher(text);
+        return matcher.find() ? matcher.group(1).trim() : "";
+    }
+
+    static String firstTomlBoolean(String text, String key) {
+        if (text == null || text.isBlank() || key == null || key.isBlank())
+            return "";
+        Matcher matcher = Pattern.compile("(?im)^\\s*" + Pattern.quote(key)
+                + "\\s*=\\s*(true|false)\\b").matcher(text);
+        return matcher.find() ? matcher.group(1).trim() : "";
+    }
+
+    static String firstJsonMetadataValue(String text, String key) {
+        if (text == null || text.isBlank() || key == null || key.isBlank())
+            return "";
+        try {
+            return jsonString(text, key);
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    static String cleanModMetadata(String value) {
+        if (value == null)
+            return "";
+        String cleaned = value.replace("\\r", " ").replace("\\n", " ").replaceAll("\\s+", " ").trim();
+        if (cleaned.isBlank() || cleaned.contains("${") || cleaned.equalsIgnoreCase("null"))
+            return "";
+        return cleaned;
+    }
+
+    void classifyModList(List<InstalledModInfo> mods) {
+        Map<String, InstalledModInfo> byId = new HashMap<>();
+        for (InstalledModInfo info : mods) {
+            for (String providedId : info.providedModIds)
+                if (!providedId.isBlank())
+                    byId.putIfAbsent(providedId, info);
+            if (!info.key().isBlank())
+                byId.putIfAbsent(info.key(), info);
+            if (isPerformanceMod(info))
+                info.group = ModListGroup.PERFORMANCE;
+            else if (isServerMod(info))
+                info.group = ModListGroup.SERVER;
+            else if (isLibraryMod(info))
+                info.group = ModListGroup.LIBRARY;
+            else if (isExperienceMod(info))
+                info.group = ModListGroup.EXPERIENCE;
+            else if (isLikelyGameplayMod(info))
+                info.group = ModListGroup.GAMEPLAY;
+            else
+                info.group = ModListGroup.OTHER;
+        }
+
+        // 只有依赖真正玩法模组的项目，或名称明确表示兼容/整合的项目，才进入扩展区；
+        // 依赖 Architectury、Curios、GeckoLib 等通用库的主玩法仍留在“玩法内容”。
+        for (InstalledModInfo info : mods) {
+            if (info.group != ModListGroup.GAMEPLAY && info.group != ModListGroup.OTHER)
+                continue;
+            if (isExtensionMod(info) || hasGameplayDependency(info, byId))
+                info.group = ModListGroup.EXTENSION;
+        }
+        for (InstalledModInfo info : mods)
+            info.kind = determineModListKind(info);
+    }
+
+    static boolean hasGameplayDependency(InstalledModInfo info, Map<String, InstalledModInfo> byId) {
+        for (ModListDependency dependency : info.requiredDependencies) {
+            InstalledModInfo target = byId.get(dependency.modId.toLowerCase(java.util.Locale.ROOT));
+            if (target != null && (target.group == ModListGroup.GAMEPLAY || target.group == ModListGroup.EXTENSION))
+                return true;
+        }
+        return false;
+    }
+
+    static boolean isPerformanceMod(InstalledModInfo info) {
+        return MOD_LIST_PERFORMANCE_IDS.contains(info.key());
+    }
+
+    static boolean isServerMod(InstalledModInfo info) {
+        if (MOD_LIST_SERVER_IDS.contains(info.key()))
+            return true;
+        String text = modListSearchText(info);
+        return containsModListToken(text, "server", "admin", "whitelist", "permission",
+                "cleanup", "maintenance");
+    }
+
+    static boolean isLibraryMod(InstalledModInfo info) {
+        if (MOD_LIST_LIBRARY_IDS.contains(info.key()))
+            return true;
+        String text = modListSearchText(info);
+        String id = info.key();
+        return id.endsWith("lib") || id.endsWith("api") || id.contains("_api")
+                || text.contains(" library") || text.contains(" library ")
+                || text.endsWith(" api") || text.contains(" config api");
+    }
+
+    static boolean isExperienceMod(InstalledModInfo info) {
+        return MOD_LIST_EXPERIENCE_IDS.contains(info.key());
+    }
+
+    static boolean isLikelyGameplayMod(InstalledModInfo info) {
+        if (MOD_LIST_GAMEPLAY_IDS.contains(info.key()))
+            return true;
+        String text = modListSearchText(info);
+        return containsModListToken(text, "thaum", "ars_nouveau", "botania", "malum", "goety", "cataclysm",
+                "twilight", "tacz", "slashblade", "maid", "companion", "aquaculture", "farmersdelight",
+                "kaleidoscope", "delight", "storage", "backpack", "chest", "furnace", "waystone",
+                "ultimine", "corpse", "lootr", "explorer", "wands", "framed", "supplement", "ironchest",
+                "visualworkbench", "polymorph", "refined", "appliedenergistics", "ftbchunks", "elegant");
+    }
+
+    static boolean isExtensionMod(InstalledModInfo info) {
+        String id = info.key();
+        String text = modListSearchText(info);
+        if (id.contains("compat") || id.contains("integration") || id.contains("bridge") || id.contains("upgrader")
+                || id.contains("kubejs") || id.startsWith("thaumic") || id.equals("forbiddenmagic")
+                || id.equals("taintedmagic") || id.equals("thaumcraftcelestial") || id.equals("nodalmechanics"))
+            return true;
+        if (id.contains("delight") && !id.equals("farmersdelight"))
+            return true;
+        if (id.startsWith("kaleidoscope_") && !id.equals("kaleidoscope_cookery"))
+            return true;
+        return text.contains(" integration") || text.contains("compatibility") || text.contains(" bridge");
+    }
+
+    static String modListSearchText(InstalledModInfo info) {
+        return (info.modId + " " + info.displayName + " " + info.fileName)
+                .toLowerCase(java.util.Locale.ROOT);
+    }
+
+    static boolean containsModListToken(String text, String... needles) {
+        if (text == null)
+            return false;
+        for (String needle : needles) {
+            if (needle != null && !needle.isBlank() && text.contains(needle))
+                return true;
+        }
+        return false;
+    }
+
+    static String determineModListKind(InstalledModInfo info) {
+        String text = modListSearchText(info);
+        return switch (info.group) {
+            case PERFORMANCE -> info.key().equals("spark") ? "性能诊断" : "性能优化";
+            case SERVER -> {
+                if (containsModListToken(text, "auth", "whitelist", "permission", "security"))
+                    yield "权限与安全";
+                if (containsModListToken(text, "cleanup", "maintenance", "stack_manager"))
+                    yield "清理与维护";
+                if (containsModListToken(text, "bluemap", "map"))
+                    yield "地图服务";
+                if (containsModListToken(text, "worldedit", "edit"))
+                    yield "建筑管理";
+                if (containsModListToken(text, "admin", "server"))
+                    yield "服务器工具";
+                yield "服务器工具";
+            }
+            case LIBRARY -> "前置库 / API";
+            case EXPERIENCE -> {
+                if (containsModListToken(text, "ftbessentials"))
+                    yield "玩家便利";
+                if (containsModListToken(text, "jei", "jade", "patchouli", "guideme"))
+                    yield "查询与指南";
+                if (containsModListToken(text, "voicechat", "chatimage", "watut"))
+                    yield "聊天与社交";
+                if (containsModListToken(text, "ysm", "yes steve", "waterframes", "watervision", "vista"))
+                    yield "视觉与媒体";
+                yield "玩家体验";
+            }
+            case EXTENSION -> {
+                if (containsModListToken(text, "thaum", "ars", "botania", "malum", "goety", "magic", "spell"))
+                    yield "魔法扩展";
+                if (containsModListToken(text, "delight", "kitchen", "cookery", "aquaculture"))
+                    yield "农业 / 烹饪扩展";
+                if (containsModListToken(text, "tacz", "slashblade", "cataclysm", "maid"))
+                    yield "战斗 / 生物扩展";
+                yield "兼容 / 联动";
+            }
+            case GAMEPLAY -> {
+                if (containsModListToken(text, "thaum", "ars_nouveau", "botania", "malum", "goety", "spell",
+                        "appliedenergistics", "refinedstorage"))
+                    yield "魔法 / 科技";
+                if (containsModListToken(text, "twilight", "cataclysm", "tacz", "slashblade", "explorer",
+                        "waystone", "lootr", "corpse"))
+                    yield "冒险 / 战斗";
+                if (containsModListToken(text, "farmersdelight", "aquaculture", "kaleidoscope", "kitchen", "delight"))
+                    yield "农业 / 烹饪";
+                if (containsModListToken(text, "supplement", "framed", "wands", "building", "visualworkbench",
+                        "storage", "backpack", "ironchest", "furnace"))
+                    yield "建筑 / 存储";
+                if (containsModListToken(text, "maid", "companion"))
+                    yield "生物 / 伙伴";
+                if (containsModListToken(text, "ultimine", "polymorph", "ftbchunks"))
+                    yield "生存便利";
+                yield "其他玩法";
+            }
+            case OTHER -> "待识别";
+        };
+    }
+
+    Map<ModListGroup, List<InstalledModInfo>> groupModList(List<InstalledModInfo> mods) {
+        Map<ModListGroup, List<InstalledModInfo>> grouped = new LinkedHashMap<>();
+        for (ModListGroup group : ModListGroup.values())
+            grouped.put(group, new ArrayList<>());
+        for (InstalledModInfo info : mods)
+            grouped.computeIfAbsent(info.group, ignored -> new ArrayList<>()).add(info);
+        for (List<InstalledModInfo> entries : grouped.values()) {
+            entries.sort((a, b) -> {
+                int c = a.kind.compareToIgnoreCase(b.kind);
+                if (c != 0)
+                    return c;
+                c = a.label().compareToIgnoreCase(b.label());
+                if (c != 0)
+                    return c;
+                return a.fileName.compareToIgnoreCase(b.fileName);
+            });
+        }
+        return grouped;
+    }
+
+    String buildModListPreface(List<InstalledModInfo> mods,
+            Map<ModListGroup, List<InstalledModInfo>> grouped) {
+        StringBuilder out = new StringBuilder(512);
+        out.append("[模组列表] 检测到 ").append(mods.size()).append(" 个启用 JAR（mods/*.jar）");
+        List<String> counts = new ArrayList<>();
+        for (ModListGroup group : ModListGroup.values()) {
+            int count = grouped.getOrDefault(group, List.of()).size();
+            if (count > 0)
+                counts.add(group.shortTitle + " " + count);
+        }
+        if (!counts.isEmpty())
+            out.append("\n分类统计：").append(String.join(" · ", counts));
+        out.append("\n阅读提示：玩法是直接增加内容；扩展/兼容会标出依赖；前置/库通常不单独增加玩法。")
+                .append("\n以下文件名来自服务器 mods 目录，版本优先读取各 JAR 的本地元数据。");
+        return out.toString();
+    }
+
+    String formatModListSection(ModListGroup group, List<InstalledModInfo> entries,
+            Map<ModListGroup, List<InstalledModInfo>> grouped) {
+        StringBuilder out = new StringBuilder(1200);
+        out.append(group.title).append("（").append(entries.size()).append("）\n").append(group.hint);
+        for (InstalledModInfo info : entries)
+            out.append('\n').append(formatModListEntry(info, grouped));
+        return out.toString();
+    }
+
+    String formatModListEntry(InstalledModInfo info,
+            Map<ModListGroup, List<InstalledModInfo>> grouped) {
+        StringBuilder out = new StringBuilder(256);
+        out.append("• ").append(info.label());
+        if (!info.version.isBlank())
+            out.append(" v").append(info.version);
+        if (!info.kind.isBlank())
+            out.append(" 〔").append(info.kind).append("〕");
+
+        if (!info.requiredDependencies.isEmpty())
+            out.append("\n  前置：").append(formatModDependencies(info.requiredDependencies, grouped));
+
+        List<ModListDependency> inferredDependencies = inferModListDependencies(info, grouped);
+        if (!inferredDependencies.isEmpty())
+            out.append("\n  关联主模组：").append(formatModDependencies(inferredDependencies, grouped));
+
+        if (info.group == ModListGroup.EXTENSION) {
+            List<ModListDependency> installedOptional = new ArrayList<>();
+            for (ModListDependency dependency : info.optionalDependencies) {
+                if (findInstalledMod(dependency.modId, grouped) != null)
+                    installedOptional.add(dependency);
+            }
+            if (!installedOptional.isEmpty())
+                out.append("\n  可选联动：").append(formatModDependencies(installedOptional, grouped));
+        }
+
+        if (info.group == ModListGroup.LIBRARY) {
+            List<InstalledModInfo> users = findModDependents(info, grouped);
+            if (!users.isEmpty())
+                out.append("\n  被使用：").append(formatModNames(users, 8));
+        }
+        out.append("\n  文件：").append(info.fileName);
+        return out.toString();
+    }
+
+    String formatModDependencies(List<ModListDependency> dependencies,
+            Map<ModListGroup, List<InstalledModInfo>> grouped) {
+        List<String> labels = new ArrayList<>();
+        for (ModListDependency dependency : dependencies) {
+            InstalledModInfo target = findInstalledMod(dependency.modId, grouped);
+            if (target == null) {
+                if ("CLIENT".equalsIgnoreCase(dependency.side))
+                    labels.add(dependency.modId + "（客户端前置，服务端未安装）");
+                else
+                    labels.add(dependency.modId + "（未在 mods 中找到）");
+            }
+            else
+                labels.add(target.label());
+        }
+        return String.join("、", labels);
+    }
+
+    List<ModListDependency> inferModListDependencies(InstalledModInfo info,
+            Map<ModListGroup, List<InstalledModInfo>> grouped) {
+        List<String> ids = switch (info.key()) {
+            case "taczpackupgrader" -> List.of("tacz");
+            case "aquaculturedelight" -> List.of("aquaculture");
+            case "kaleidoscope_compat", "kaleidoscope_tavern", "kaleidoscope_end",
+                    "kaleidoscope_nether", "kaleidoscope_doll" -> List.of("kaleidoscope_cookery");
+            default -> List.of();
+        };
+        List<ModListDependency> inferred = new ArrayList<>();
+        for (String id : ids) {
+            if (id.equalsIgnoreCase(info.modId))
+                continue;
+            boolean alreadyDeclared = false;
+            for (ModListDependency dependency : info.requiredDependencies) {
+                if (dependency.modId.equalsIgnoreCase(id)) {
+                    alreadyDeclared = true;
+                    break;
+                }
+            }
+            if (!alreadyDeclared && findInstalledMod(id, grouped) != null)
+                inferred.add(new ModListDependency(id, false, "", ""));
+        }
+        return inferred;
+    }
+
+    InstalledModInfo findInstalledMod(String modId, Map<ModListGroup, List<InstalledModInfo>> grouped) {
+        if (modId == null || modId.isBlank())
+            return null;
+        String key = modId.toLowerCase(java.util.Locale.ROOT);
+        for (List<InstalledModInfo> entries : grouped.values()) {
+            for (InstalledModInfo info : entries) {
+                if (info.provides(key))
+                    return info;
+            }
+        }
+        return null;
+    }
+
+    List<InstalledModInfo> findModDependents(InstalledModInfo target,
+            Map<ModListGroup, List<InstalledModInfo>> grouped) {
+        List<InstalledModInfo> users = new ArrayList<>();
+        for (List<InstalledModInfo> entries : grouped.values()) {
+            for (InstalledModInfo info : entries) {
+                for (ModListDependency dependency : info.requiredDependencies) {
+                    if (target.provides(dependency.modId)) {
+                        users.add(info);
+                        break;
+                    }
+                }
+            }
+        }
+        users.sort((a, b) -> a.label().compareToIgnoreCase(b.label()));
+        return users;
+    }
+
+    static String formatModNames(List<InstalledModInfo> mods, int max) {
+        List<String> labels = new ArrayList<>();
+        int limit = Math.min(max, mods.size());
+        for (int i = 0; i < limit; i++)
+            labels.add(mods.get(i).label());
+        if (mods.size() > limit)
+            labels.add("等 " + mods.size() + " 个模组");
+        return String.join("、", labels);
+    }
+
+    static String leadingModFileLabel(String fileName) {
+        if (fileName == null || fileName.isBlank())
+            return "";
+        Matcher matcher = Pattern.compile("^\\s*(\\[[^\\]]+\\])").matcher(fileName);
+        return matcher.find() ? matcher.group(1) : "";
+    }
     // 从 "... entity data: "minecraft:overworld"" 里抽出引号内容（精确路径查询的小输出）
     static String parseEntityQuoted(String out) {
         if (out == null)

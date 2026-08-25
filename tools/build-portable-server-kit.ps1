@@ -563,6 +563,7 @@ $files = @(
     'docs\portable-server-kit.md',
     'docs\qq-ai-provider-switch.md',
     'docs\qq-video-audio-ai.md',
+    'docs\qq-mod-list-模组清单分类.md',
     'docs\RELEASE-NOTES-v0.4.1.md',
     'tools\portable-pack.example.json',
     'tools\portable-ops-config.example.json',
